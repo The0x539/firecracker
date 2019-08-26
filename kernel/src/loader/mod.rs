@@ -201,9 +201,14 @@ where
         Some(addr) => addr,
     };
 
-    let src_addr = load_addrs.load_addr as usize;
-    let dest_addr = GuestAddress(src_addr + load_addrs.header_addr as usize - mb2_location);
+    //println!("load_addrs: {:#X?}", load_addrs);
+    //println!("entry_addr: {:#X?}", entry_addr);
+
+    let src_addr = load_addrs.load_addr as usize - (load_addrs.header_addr as usize - mb2_location);
+    let dest_addr = GuestAddress(load_addrs.load_addr as usize);
     let read_len = (load_addrs.load_end_addr - load_addrs.load_addr) as usize;
+
+    //println!("reading {:#X} bytes from file@{:#X} into mem@{:#X}", read_len, src_addr, dest_addr.0);
 
     kernel_image
         .seek(SeekFrom::Start(src_addr as u64))
