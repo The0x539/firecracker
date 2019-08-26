@@ -11,9 +11,22 @@ pub mod layout;
 mod mptable;
 pub mod regs;
 
-use std::mem;
+pub mod multiboot2;
+
+use std::mem::{self, size_of};
 
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
+use arch_gen::x86::multiboot2::{
+    self as mb,
+
+    multiboot_tag as mb_tag,
+    multiboot_tag_basic_meminfo as mb_tag_basic_meminfo,
+    multiboot_tag_mmap as mb_tag_mmap,
+    multiboot_mmap_entry as mb_mmap_entry,
+
+    MULTIBOOT_TAG_TYPE_BASIC_MEMINFO as MB_TAG_TYPE_BASIC_MEMINFO,
+    MULTIBOOT_TAG_TYPE_MMAP as MB_TAG_TYPE_MMAP,
+};
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
@@ -23,9 +36,21 @@ use memory_model::{DataInit, GuestAddress, GuestMemory};
 // is prohibited.
 #[derive(Copy, Clone)]
 struct BootParamsWrapper(boot_params);
+#[derive(Copy, Clone)]
+struct MbTagWrapper(mb_tag);
+#[derive(Copy, Clone)]
+struct MbMeminfoWrapper(mb_tag_basic_meminfo);
+#[derive(Copy, Clone)]
+struct MbMmapWrapper(mb_tag_mmap);
+#[derive(Copy, Clone)]
+struct MbEntryWrapper(mb_mmap_entry);
 
 // It is safe to initialize BootParamsWrap which is a wrapper over `boot_params` (a series of ints).
 unsafe impl DataInit for BootParamsWrapper {}
+unsafe impl DataInit for MbTagWrapper {}
+unsafe impl DataInit for MbMeminfoWrapper {}
+unsafe impl DataInit for MbMmapWrapper {}
+unsafe impl DataInit for MbEntryWrapper {}
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -37,6 +62,11 @@ pub enum Error {
     ZeroPagePastRamEnd,
     /// Error writing the zero page of guest memory.
     ZeroPageSetup,
+    /// Not enough space below kernel for multiboot info
+    // this code is a hack, but I don't give a damn
+    MultibootTooBig, // for the gotdamn RAM
+    /// Error writing multiboot info
+    MultibootSetup,
 }
 
 impl From<Error> for super::Error {
@@ -84,6 +114,98 @@ pub fn get_32bit_gap_start() -> usize {
 /// Returns the memory address where the kernel could be loaded.
 pub fn get_kernel_start() -> usize {
     layout::HIMEM_START
+}
+
+pub fn mb_configure_system(
+    guest_mem: &GuestMemory,
+    cmdline_addr: GuestAddress,
+    cmdline_size: usize,
+    num_cpus: u8,
+) -> super::Result<()> {
+    let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
+    let end_32bit_gap_start = GuestAddress(get_32bit_gap_start());
+
+    let himem_start = GuestAddress(layout::HIMEM_START);
+    
+    let mut head_tag = mb_tag::default();
+    let mut meminfo = mb_tag_basic_meminfo::default();
+    let mut memmap = mb_tag_mmap::default();
+    let mut entries = std::cell::RefCell::new(Vec::new());
+    let mut end_tag = mb_tag::default();
+    
+    // the "totalsize" field as named in mb_info_header in palacios
+    head_tag.type_ = (
+        size_of::<mb_tag>() +
+        size_of::<mb_tag_basic_meminfo>() +
+        size_of::<mb_tag_mmap>() +
+        size_of::<mb_mmap_entry>() * guest_mem.num_regions() +
+        size_of::<mb_tag>()) as u32;
+    
+    // the "reserved" field as named in mb_info_header in palacios
+    head_tag.size = 0;
+
+    meminfo.type_ = MB_TAG_TYPE_BASIC_MEMINFO;
+    meminfo.size = size_of::<mb_tag_basic_meminfo>() as u32;
+    //meminfo.mem_lower = 0;
+    meminfo.mem_lower = 640; // thank you, bill gates
+    // possibly wrong
+    meminfo.mem_upper = ((guest_mem.end_addr().0 - 1024*1024) / 1024) as u32;
+
+    memmap.type_ = MB_TAG_TYPE_MMAP;
+    memmap.size = size_of::<mb_tag_basic_meminfo>() as u32;
+    memmap.size += (size_of::<mb_mmap_entry>() * guest_mem.num_regions()) as u32;
+    memmap.entry_size = size_of::<mb_mmap_entry>() as u32;
+    memmap.entry_version = 0;
+
+    guest_mem.with_regions::<_, ()>(|index, base, size, ptr| {
+        entries.borrow_mut().push(mb_mmap_entry {
+            addr: base.0 as u64,
+            len: size as u64,
+            // this seems like info that ought to exist but doesn't
+            type_: mb::MULTIBOOT_MEMORY_AVAILABLE,
+            zero: 0,
+        });
+        Ok(())
+    });
+
+    end_tag.type_ = 0;
+    end_tag.size = 8;
+
+    // Assume for the time being that we have space below the kernel
+    let mb_addr = GuestAddress(layout::ZERO_PAGE_START);
+    guest_mem
+        .checked_offset(mb_addr, head_tag.type_ as usize)
+        .ok_or(Error::MultibootTooBig)?;
+
+    let mut offset = 0;
+
+    guest_mem
+        .write_obj_at_addr(MbTagWrapper(head_tag), mb_addr.unchecked_add(offset))
+        .map_err(|_| Error::MultibootSetup)?;
+    offset += size_of::<mb_tag>();
+
+    guest_mem
+        .write_obj_at_addr(MbMeminfoWrapper(meminfo), mb_addr.unchecked_add(offset))
+        .map_err(|_| Error::MultibootSetup)?;
+    offset += size_of::<mb_tag_basic_meminfo>();
+
+    guest_mem
+        .write_obj_at_addr(MbMmapWrapper(memmap), mb_addr.unchecked_add(offset))
+        .map_err(|_| Error::MultibootSetup)?;
+    offset += size_of::<mb_tag_mmap>();
+
+    for entry in entries.into_inner() {
+        guest_mem
+            .write_obj_at_addr(MbEntryWrapper(entry), mb_addr.unchecked_add(offset))
+            .map_err(|_| Error::MultibootSetup)?;
+        offset += size_of::<mb_mmap_entry>();
+    }
+
+    guest_mem
+        .write_obj_at_addr(MbTagWrapper(end_tag), mb_addr.unchecked_add(offset))
+        .map_err(|_| Error::MultibootSetup)?;
+
+    Ok(())
 }
 
 /// Configures the system and should be called once per vm before starting vcpu threads.

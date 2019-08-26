@@ -10,3 +10,5 @@ pub mod loader;
 
 extern crate memory_model;
 extern crate sys_util;
+extern crate arch_gen;
+extern crate arch;

@@ -5,3 +5,5 @@ version = "0.1.0"
 [dependencies]
 memory_model = { path = "../memory_model" }
 sys_util = { path = "../sys_util" }
+arch_gen = { path = "../arch_gen" }
+arch = { path = "../arch" }

@@ -17,6 +17,9 @@ use super::cmdline::Error as CmdlineError;
 use memory_model::{GuestAddress, GuestMemory};
 use sys_util;
 
+//use arch_gen::x86::multiboot2;
+use arch::x86_64::multiboot2 as mb2;
+
 #[allow(non_camel_case_types)]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 // Add here any other architecture that uses as kernel image an ELF file.
@@ -63,6 +66,149 @@ impl fmt::Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn is_valid_mb_header(header: mb2::Header) -> bool {
+    if header.magic != mb2::HEADER_MAGIC {
+        return false;
+    }
+    // firecracker doesn't, at the time of writing, support MIPS
+    if header.architecture != mb2::Architecture::I386 {
+        return false;
+    }
+    let sum = header.checksum
+        .wrapping_add(header.magic)
+        .wrapping_add(header.architecture as u32)
+        .wrapping_add(header.header_length);
+    if sum != 0 {
+        return false;
+    }
+    return true;
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub fn load_kernel<F>(
+    guest_mem: &GuestMemory,
+    kernel_image: &mut F,
+    start_address: usize,
+) -> Result<GuestAddress>
+where
+    F: Read + Seek,
+{
+    
+    load_elf_kernel(guest_mem, kernel_image, start_address)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn find_mb2_header<F>(kernel_image: &mut F) -> Result<Option<usize>>
+where F: Read + Seek {
+    // the first address after the ELF header
+    // that's 8-byte aligned
+    // consider just looking at the beginning
+    /*
+    let first_mb_addr = {
+        let mut addr = ehdr.e_ehsize;
+        addr += 7;
+        addr -= addr % 8;
+        addr as u32
+    };
+    */
+    let first_mb_addr = 0;
+
+    for i in (first_mb_addr..mb2::HEADER_SEARCH).step_by(mb2::HEADER_ALIGN as usize) {
+        kernel_image
+            .seek(SeekFrom::Start(i as u64))
+            .map_err(|_| Error::SeekProgramHeader)?;
+        let mut mb_hdr = mb2::Header::default();
+        unsafe {
+            // The multiboot header is a POD struct, so read_struct is safe.
+            sys_util::read_struct(kernel_image, &mut mb_hdr)
+                .map_err(|_| Error::ReadKernelDataStruct("Failed to read potential Multiboot header"))?;
+        }
+        if is_valid_mb_header(mb_hdr) {
+            return Ok(Some(0))
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn load_mb2_kernel<F>(
+    guest_mem: &GuestMemory,
+    kernel_image: &mut F,
+    start_address: usize,
+) -> Result<GuestAddress>
+where
+    F: Read + Seek,
+{
+    // the first address after the ELF header
+    // that's 8-byte aligned
+    // consider just looking at the beginning
+    /*
+    let first_mb_addr = {
+        let mut addr = ehdr.e_ehsize;
+        addr += 7;
+        addr -= addr % 8;
+        addr as u32
+    };
+    */
+    let first_mb_addr = 0;
+
+    for i in (first_mb_addr..mb2::HEADER_SEARCH).step_by(mb2::HEADER_ALIGN as usize) {
+        kernel_image
+            .seek(SeekFrom::Start(i as u64))
+            .map_err(|_| Error::SeekProgramHeader)?;
+        let mut mb_hdr = mb2::Header::default();
+        unsafe {
+            // The multiboot header is a POD struct, so read_struct is safe.
+            sys_util::read_struct(kernel_image, &mut mb_hdr)
+                .map_err(|_| Error::ReadKernelDataStruct("Failed to read potential Multiboot header"))?;
+        }
+        if is_valid_mb_header(mb_hdr) {
+            //println!("found {:#?} @ {:#X}", mb_hdr, i);
+            let mut offset = i + mem::size_of::<mb2::Header>() as u32;
+            loop {
+                let mut tag = mb2::HeaderTag::default();
+                kernel_image
+                    .seek(SeekFrom::Start(offset as u64))
+                    .map_err(|_| Error::SeekProgramHeader)?;
+                unsafe {
+                    sys_util::read_struct(kernel_image, &mut tag)
+                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tag"))?;
+                }
+                //println!("{:#X?} @ {:#X}", tag, offset);
+                match tag.tag_type {
+                    mb2::HeaderTagType::End => {
+                        break;
+                    }
+                    mb2::HeaderTagType::Address => {
+                        let mut data = mb2::HeaderAddress::default();
+                        unsafe {
+                            sys_util::read_struct(kernel_image, &mut data)
+                                .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
+                        }
+                        //println!("{:#X?}", data);
+                    }
+                    mb2::HeaderTagType::EntryAddress |
+                    mb2::HeaderTagType::EntryAddressEfi32 |
+                    mb2::HeaderTagType::EntryAddressEfi64 => {
+                        let mut data = mb2::HeaderEntryAddress::default();
+                        unsafe {
+                            sys_util::read_struct(kernel_image, &mut data)
+                                .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
+                        }
+                        //println!("{:#X?}", data);
+                    }
+                    _ => {
+                        println!("unhandled tag type: {:?}", tag.tag_type);
+                    }
+                }
+                offset += tag.size;
+            }
+        }
+    }
+    Ok(GuestAddress(0))
+}
+
 /// Loads a kernel from a vmlinux elf image to a slice
 ///
 /// # Arguments
@@ -73,7 +219,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Returns the entry address of the kernel.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub fn load_kernel<F>(
+fn load_elf_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
