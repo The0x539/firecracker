@@ -217,6 +217,27 @@ where
     guest_mem
         .read_to_memory(dest_addr, kernel_image, read_len)
         .map_err(|_| Error::ReadKernelImage)?;
+
+    struct Zeroes ();
+    impl Read for Zeroes {
+        fn read(&mut self, dest : &mut [u8]) -> std::result::Result<usize, std::io::Error> {
+            for i in 0..dest.len(){
+                dest[i] = 0;
+            }
+            Ok(dest.len())
+        }
+    }
+
+    let bss_addr = GuestAddress(load_addrs.load_end_addr as usize);
+    let bss_len = (load_addrs.bss_end_addr - load_addrs.load_end_addr) as usize;
+
+    //println!("zeroing {:#X} bytes from mem@{:#X} to mem@{:#X}", bss_len, load_addrs.load_end_addr, load_addrs.bss_end_addr);
+
+    guest_mem
+        .read_to_memory(bss_addr, &mut Zeroes(), bss_len)
+        .map_err(|_| Error::ReadKernelImage)?;
+
+    //println!("Multiboot2 kernel loaded into guest memory!");
     
     Ok(entry_addr)
 }
