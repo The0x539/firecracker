@@ -94,8 +94,12 @@ pub fn load_kernel<F>(
 where
     F: Read + Seek,
 {
-    
-    load_elf_kernel(guest_mem, kernel_image, start_address)
+    let mb_hdr_addr = find_mb2_header(kernel_image)
+        .map_err(|_| Error::ReadKernelImage)?;
+    match mb_hdr_addr {
+        None => load_elf_kernel(guest_mem, kernel_image, start_address),
+        Some(addr) => load_mb2_kernel(guest_mem, kernel_image, start_address, addr),
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -122,10 +126,11 @@ where F: Read + Seek {
         unsafe {
             // The multiboot header is a POD struct, so read_struct is safe.
             sys_util::read_struct(kernel_image, &mut mb_hdr)
-                .map_err(|_| Error::ReadKernelDataStruct("Failed to read potential Multiboot header"))?;
+                .map_err(|_| Error::ReadKernelDataStruct("Failed to read kernel img while searching for mb2 hdr"))?;
         }
         if is_valid_mb_header(mb_hdr) {
-            return Ok(Some(0))
+            println!("found {:#?} @ {:#X}", mb_hdr, i);
+            return Ok(Some(i as usize))
         }
     }
     Ok(None)
@@ -136,75 +141,49 @@ fn load_mb2_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
+    header_address: usize,
 ) -> Result<GuestAddress>
 where
     F: Read + Seek,
 {
-    // the first address after the ELF header
-    // that's 8-byte aligned
-    // consider just looking at the beginning
-    /*
-    let first_mb_addr = {
-        let mut addr = ehdr.e_ehsize;
-        addr += 7;
-        addr -= addr % 8;
-        addr as u32
-    };
-    */
-    let first_mb_addr = 0;
-
-    for i in (first_mb_addr..mb2::HEADER_SEARCH).step_by(mb2::HEADER_ALIGN as usize) {
+    let mut offset = header_address + mem::size_of::<mb2::Header>();
+    loop {
+        let mut tag = mb2::HeaderTag::default();
         kernel_image
-            .seek(SeekFrom::Start(i as u64))
+            .seek(SeekFrom::Start(offset as u64))
             .map_err(|_| Error::SeekProgramHeader)?;
-        let mut mb_hdr = mb2::Header::default();
         unsafe {
-            // The multiboot header is a POD struct, so read_struct is safe.
-            sys_util::read_struct(kernel_image, &mut mb_hdr)
-                .map_err(|_| Error::ReadKernelDataStruct("Failed to read potential Multiboot header"))?;
+            sys_util::read_struct(kernel_image, &mut tag)
+                .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tag"))?;
         }
-        if is_valid_mb_header(mb_hdr) {
-            //println!("found {:#?} @ {:#X}", mb_hdr, i);
-            let mut offset = i + mem::size_of::<mb2::Header>() as u32;
-            loop {
-                let mut tag = mb2::HeaderTag::default();
-                kernel_image
-                    .seek(SeekFrom::Start(offset as u64))
-                    .map_err(|_| Error::SeekProgramHeader)?;
+        println!("{:#X?} @ {:#X}", tag, offset);
+        match tag.tag_type {
+            mb2::HeaderTagType::End => {
+                break;
+            }
+            mb2::HeaderTagType::Address => {
+                let mut data = mb2::HeaderAddress::default();
                 unsafe {
-                    sys_util::read_struct(kernel_image, &mut tag)
-                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tag"))?;
+                    sys_util::read_struct(kernel_image, &mut data)
+                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
                 }
-                //println!("{:#X?} @ {:#X}", tag, offset);
-                match tag.tag_type {
-                    mb2::HeaderTagType::End => {
-                        break;
-                    }
-                    mb2::HeaderTagType::Address => {
-                        let mut data = mb2::HeaderAddress::default();
-                        unsafe {
-                            sys_util::read_struct(kernel_image, &mut data)
-                                .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
-                        }
-                        //println!("{:#X?}", data);
-                    }
-                    mb2::HeaderTagType::EntryAddress |
-                    mb2::HeaderTagType::EntryAddressEfi32 |
-                    mb2::HeaderTagType::EntryAddressEfi64 => {
-                        let mut data = mb2::HeaderEntryAddress::default();
-                        unsafe {
-                            sys_util::read_struct(kernel_image, &mut data)
-                                .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
-                        }
-                        //println!("{:#X?}", data);
-                    }
-                    _ => {
-                        println!("unhandled tag type: {:?}", tag.tag_type);
-                    }
+                println!("{:#X?}", data);
+            }
+            mb2::HeaderTagType::EntryAddress |
+            mb2::HeaderTagType::EntryAddressEfi32 |
+            mb2::HeaderTagType::EntryAddressEfi64 => {
+                let mut data = mb2::HeaderEntryAddress::default();
+                unsafe {
+                    sys_util::read_struct(kernel_image, &mut data)
+                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
                 }
-                offset += tag.size;
+                println!("{:#X?}", data);
+            }
+            _ => {
+                println!("unhandled tag type: {:?}", tag.tag_type);
             }
         }
+        offset += tag.size as usize;
     }
     Ok(GuestAddress(0))
 }
