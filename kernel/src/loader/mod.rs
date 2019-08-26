@@ -38,6 +38,7 @@ pub enum Error {
     SeekKernelStart,
     SeekKernelImage,
     SeekProgramHeader,
+    MissingHeaderTag,
 }
 
 impl fmt::Display for Error {
@@ -59,6 +60,7 @@ impl fmt::Display for Error {
                 }
                 Error::SeekKernelImage => "Failed to seek to offset of kernel image",
                 Error::SeekProgramHeader => "Failed to seek to ELF program header",
+                Error::MissingHeaderTag => "Header did not contain all necessary tags",
             }
         )
     }
@@ -141,12 +143,15 @@ fn load_mb2_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
-    header_address: usize,
+    mb2_location: usize,
 ) -> Result<GuestAddress>
 where
     F: Read + Seek,
 {
-    let mut offset = header_address + mem::size_of::<mb2::Header>();
+    let mut opt_load_addrs: Option<mb2::HeaderAddress> = None;
+    let mut opt_entry_addr: Option<GuestAddress> = None;
+
+    let mut offset = mb2_location + mem::size_of::<mb2::Header>();
     loop {
         let mut tag = mb2::HeaderTag::default();
         kernel_image
@@ -156,7 +161,7 @@ where
             sys_util::read_struct(kernel_image, &mut tag)
                 .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tag"))?;
         }
-        println!("{:#X?} @ {:#X}", tag, offset);
+        //println!("{:#X?} @ {:#X}", tag, offset);
         match tag.tag_type {
             mb2::HeaderTagType::End => {
                 break;
@@ -167,7 +172,8 @@ where
                     sys_util::read_struct(kernel_image, &mut data)
                         .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
                 }
-                println!("{:#X?}", data);
+                opt_load_addrs = Some(data);
+                //println!("{:#X?}", data);
             }
             mb2::HeaderTagType::EntryAddress |
             mb2::HeaderTagType::EntryAddressEfi32 |
@@ -177,7 +183,8 @@ where
                     sys_util::read_struct(kernel_image, &mut data)
                         .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
                 }
-                println!("{:#X?}", data);
+                opt_entry_addr = Some(GuestAddress(data.entry_addr as usize));
+                //println!("{:#X?}", data);
             }
             _ => {
                 println!("unhandled tag type: {:?}", tag.tag_type);
@@ -185,7 +192,28 @@ where
         }
         offset += tag.size as usize;
     }
-    Ok(GuestAddress(0))
+    let load_addrs = match opt_load_addrs {
+        None => return Err(Error::MissingHeaderTag),
+        Some(addrs) => addrs,
+    };
+    let entry_addr = match opt_entry_addr {
+        None => return Err(Error::MissingHeaderTag),
+        Some(addr) => addr,
+    };
+
+    let src_addr = load_addrs.load_addr as usize;
+    let dest_addr = GuestAddress(src_addr + load_addrs.header_addr as usize - mb2_location);
+    let read_len = (load_addrs.load_end_addr - load_addrs.load_addr) as usize;
+
+    kernel_image
+        .seek(SeekFrom::Start(src_addr as u64))
+        .map_err(|_| Error::SeekKernelStart)?;
+
+    guest_mem
+        .read_to_memory(dest_addr, kernel_image, read_len)
+        .map_err(|_| Error::ReadKernelImage)?;
+    
+    Ok(entry_addr)
 }
 
 /// Loads a kernel from a vmlinux elf image to a slice
