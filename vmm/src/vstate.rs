@@ -348,7 +348,7 @@ impl Vcpu {
     fn run_emulation(&mut self) -> Result<()> {
         match self.fd.run() {
             Ok(run) => match run {
-                VcpuExit::IoOut(0x7C4, data) => {
+                VcpuExit::IoOut(0x7C4, _data) => {
                     println!("output on magic port");
                     Ok(())
                 }

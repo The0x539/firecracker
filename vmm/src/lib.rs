@@ -712,6 +712,8 @@ struct KernelConfig {
     kernel_file: File,
     #[cfg(target_arch = "x86_64")]
     cmdline_addr: GuestAddress,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    is_multiboot: bool,
 }
 
 struct Vmm {
@@ -1294,12 +1296,18 @@ impl Vmm {
         let vm_memory = self.vm.get_memory().ok_or(StartMicrovmError::GuestMemory(
             memory_model::GuestMemoryError::MemoryNotInitialized,
         ))?;
-        let entry_addr = kernel_loader::load_kernel(
+
+        let (entry_addr, is_multiboot) = kernel_loader::load_kernel(
             vm_memory,
             &mut kernel_config.kernel_file,
             arch::get_kernel_start(),
         )
         .map_err(StartMicrovmError::KernelLoader)?;
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            kernel_config.is_multiboot = is_multiboot;
+        }
 
         // This is x86_64 specific since on aarch64 the commandline will be specified through the FDT.
         #[cfg(target_arch = "x86_64")]
@@ -1659,6 +1667,8 @@ impl Vmm {
             cmdline,
             #[cfg(target_arch = "x86_64")]
             cmdline_addr: GuestAddress(arch::x86_64::layout::CMDLINE_START),
+            #[cfg(target_arch = "x86_64")]
+            is_multiboot: false,
         };
         self.configure_kernel(kernel_config);
 

@@ -92,15 +92,15 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, bool)>
 where
     F: Read + Seek,
 {
     let mb_hdr_addr = find_mb2_header(kernel_image)
         .map_err(|_| Error::ReadKernelImage)?;
     match mb_hdr_addr {
-        None => load_elf_kernel(guest_mem, kernel_image, start_address),
-        Some(addr) => load_mb2_kernel(guest_mem, kernel_image, start_address, addr),
+        None => load_elf_kernel(guest_mem, kernel_image, start_address).map(|x| (x, false)),
+        Some(addr) => load_mb2_kernel(guest_mem, kernel_image, start_address, addr).map(|x| (x, true)),
     }
 }
 
@@ -329,7 +329,7 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, bool)>
 where
     F: Read + Seek,
 {
@@ -403,7 +403,7 @@ where
         )
         .map_err(|_| Error::ReadKernelImage)?;
 
-    Ok(GuestAddress(kernel_load_offset))
+    Ok(GuestAddress(kernel_load_offset), false)
 }
 
 /// Writes the command line string to the given memory slice.
