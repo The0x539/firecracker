@@ -256,6 +256,7 @@ impl Vcpu {
         machine_config: &VmConfig,
         kernel_start_addr: GuestAddress,
         vm: &Vm,
+        is_multiboot: bool,
     ) -> Result<()> {
         let cpuid_vm_spec = VmSpec::new(
             self.id,
@@ -292,7 +293,7 @@ impl Vcpu {
         let vm_memory = vm
             .get_memory()
             .ok_or(Error::GuestMemory(GuestMemoryError::MemoryNotInitialized))?;
-        arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.offset() as u64)
+        arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.offset() as u64, is_multiboot)
             .map_err(Error::REGSConfiguration)?;
         arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
         arch::x86_64::regs::setup_sregs(vm_memory, &self.fd).map_err(Error::SREGSConfiguration)?;
@@ -313,6 +314,7 @@ impl Vcpu {
         _machine_config: &VmConfig,
         kernel_load_addr: GuestAddress,
         vm: &Vm,
+        is_multiboot: bool,
     ) -> Result<()> {
         let vm_memory = vm
             .get_memory()

@@ -1215,13 +1215,17 @@ impl Vmm {
             .vm_config
             .vcpu_count
             .ok_or(StartMicrovmError::VcpusNotConfigured)?;
+        let kernel_config = self
+            .kernel_config
+            .as_mut()
+            .ok_or(StartMicrovmError::MissingKernelConfig)?;
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
 
         for cpu_id in 0..vcpu_count {
             let io_bus = self.legacy_device_manager.io_bus.clone();
             let mut vcpu = Vcpu::new(cpu_id, &self.vm, io_bus, request_ts.clone())
                 .map_err(StartMicrovmError::Vcpu)?;
-            vcpu.configure(&self.vm_config, entry_addr, &self.vm)
+            vcpu.configure(&self.vm_config, entry_addr, &self.vm, kernel_config.is_multiboot)
                 .map_err(StartMicrovmError::VcpuConfigure)?;
             vcpus.push(vcpu);
         }

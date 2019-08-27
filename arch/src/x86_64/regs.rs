@@ -89,13 +89,34 @@ pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
         .map_err(Error::SetModelSpecificRegisters)
 }
 
+pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64, is_multiboot: bool) -> Result<()> {
+    if is_multiboot {
+        return mb_setup_regs(vcpu, boot_ip);
+    } else {
+        return linux_setup_regs(vcpu, boot_ip);
+    }
+}
+
+
+fn mb_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
+    let regs: kvm_regs = kvm_regs {
+        rflags: 0x0000_0000_0000_0002u64, // copied from linux ver???
+        rip: boot_ip,
+        rax: 0x36d76289,
+        rbx: super::layout::ZERO_PAGE_START as u64,
+        ..Default::default()
+    };
+
+    vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
+}
+
 /// Configure base registers for a given CPU.
 ///
 /// # Arguments
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
 /// * `boot_ip` - Starting instruction pointer.
-pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
+fn linux_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
     let regs: kvm_regs = kvm_regs {
         rflags: 0x0000_0000_0000_0002u64,
         rip: boot_ip,
