@@ -1345,6 +1345,7 @@ impl Vmm {
             kernel_config.cmdline_addr,
             kernel_config.cmdline.len() + 1,
             vcpu_count,
+            kernel_config.is_multiboot,
         )
         .map_err(StartMicrovmError::ConfigureSystem)?;
 

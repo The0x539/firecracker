@@ -116,7 +116,21 @@ pub fn get_kernel_start() -> usize {
     layout::HIMEM_START
 }
 
-pub fn mb_configure_system(
+pub fn configure_system(
+    guest_mem: &GuestMemory,
+    cmdline_addr: GuestAddress,
+    cmdline_size: usize,
+    num_cpus: u8,
+    is_multiboot: bool,
+) -> super::Result<()> {
+    if is_multiboot {
+        return mb_configure_system(guest_mem, cmdline_addr, cmdline_size, num_cpus);
+    } else {
+        return bp_configure_system(guest_mem, cmdline_addr, cmdline_size, num_cpus);
+    }
+}
+
+fn mb_configure_system(
     guest_mem: &GuestMemory,
     cmdline_addr: GuestAddress,
     cmdline_size: usize,
@@ -157,7 +171,7 @@ pub fn mb_configure_system(
     memmap.entry_size = size_of::<mb_mmap_entry>() as u32;
     memmap.entry_version = 0;
 
-    guest_mem.with_regions::<_, ()>(|index, base, size, ptr| {
+    guest_mem.with_regions::<_, ()>(|_index, base, size, _ptr| {
         entries.borrow_mut().push(mb_mmap_entry {
             addr: base.0 as u64,
             len: size as u64,
@@ -216,7 +230,7 @@ pub fn mb_configure_system(
 /// * `cmdline_addr` - Address in `guest_mem` where the kernel command line was loaded.
 /// * `cmdline_size` - Size of the kernel command line in bytes including the null terminator.
 /// * `num_cpus` - Number of virtual CPUs the guest will have.
-pub fn configure_system(
+fn bp_configure_system(
     guest_mem: &GuestMemory,
     cmdline_addr: GuestAddress,
     cmdline_size: usize,
