@@ -296,7 +296,7 @@ impl Vcpu {
         arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.offset() as u64, is_multiboot)
             .map_err(Error::REGSConfiguration)?;
         arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
-        arch::x86_64::regs::setup_sregs(vm_memory, &self.fd).map_err(Error::SREGSConfiguration)?;
+        arch::x86_64::regs::setup_sregs(vm_memory, &self.fd, is_multiboot).map_err(Error::SREGSConfiguration)?;
         arch::x86_64::interrupts::set_lint(&self.fd).map_err(Error::LocalIntConfiguration)?;
         Ok(())
     }

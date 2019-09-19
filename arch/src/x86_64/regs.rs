@@ -7,7 +7,7 @@
 
 use std::{io, mem, result};
 
-use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_msrs, kvm_regs, kvm_sregs};
+use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_msrs, kvm_regs, kvm_sregs, kvm_segment};
 use kvm_ioctls::VcpuFd;
 
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
@@ -134,17 +134,38 @@ fn linux_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
 
+pub fn setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, is_multiboot: bool) -> Result<()> {
+    if is_multiboot {
+        return mb_setup_sregs(mem, vcpu);
+    } else {
+        return linux_setup_sregs(mem, vcpu);
+    }
+}
+
 /// Configures the segment registers and system page tables for a given CPU.
 ///
 /// # Arguments
 ///
 /// * `mem` - The memory that will be passed to the guest.
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd) -> Result<()> {
+fn linux_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd) -> Result<()> {
     let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
 
     configure_segments_and_sregs(mem, &mut sregs)?;
     setup_page_tables(mem, &mut sregs)?; // TODO(dgreid) - Can this be done once per system instead?
+
+    vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
+}
+
+
+fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd) -> Result<()> {
+    let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
+    mb_configure_segments_and_sregs(mem, &mut sregs)?;
+    //setup_page_tables(mem, &mut sregs)?;
+    //sregs.cr3 = GuestAddress(PML4_START).offset() as u64;
+    sregs.cr4 &= !X86_CR4_PAE;
+    sregs.cr0 &= !X86_CR0_PG;
+    sregs.cr0 |= X86_CR0_PE;
 
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
@@ -213,6 +234,69 @@ fn configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Res
     /* 64-bit protected mode */
     sregs.cr0 |= X86_CR0_PE;
     sregs.efer |= EFER_LME | EFER_LMA;
+
+    Ok(())
+}
+
+fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {
+    let gdt_table: [u64; 3 as usize] = [
+        gdt_entry(0, 0, 0),               // NULL
+        gdt_entry(0xcf9a, 0, 0xffff), // CODE
+        gdt_entry(0xcf92, 0, 0xffff), // DATA
+    ];
+
+    //let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
+    //let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+
+    // Write segments
+    //write_gdt_table(&gdt_table[..], mem)?;
+    //sregs.gdt.base = BOOT_GDT_OFFSET as u64;
+    //sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
+
+    //write_idt_value(0, mem)?;
+    //sregs.idt.base = BOOT_IDT_OFFSET as u64;
+    //sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
+
+    let code_seg = kvm_segment {
+        base: 0x0,
+        limit: 0xffffffff,
+        selector: 0x8,
+        type_: 0xa,
+        present: 1,
+        dpl: 0,
+        db: 1,
+        s: 1,
+        l: 0,
+        g: 1,
+        ..Default::default()
+    };
+
+    let data_seg = kvm_segment {
+        selector: 0x10,
+        base: 0x0,
+        limit: 0xffffffff,
+        type_: 0x2,
+        s: 1,
+        dpl: 0,
+        present: 1,
+        l: 0,
+        db: 1,
+        g: 1,
+        ..Default::default()
+    };
+
+    sregs.cs = code_seg;
+    sregs.ds = data_seg;
+    sregs.es = data_seg;
+    sregs.fs = data_seg;
+    sregs.gs = data_seg;
+    sregs.ss = data_seg;
+    //sregs.tr = tss_seg;
+
+    /* 64-bit protected mode */
+    //no
+    sregs.cr0 |= X86_CR0_PE;
+    //sregs.efer |= EFER_LME | EFER_LMA;
 
     Ok(())
 }
