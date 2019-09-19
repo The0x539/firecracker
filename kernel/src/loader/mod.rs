@@ -186,6 +186,14 @@ where
                 opt_entry_addr = Some(GuestAddress(data.entry_addr as usize));
                 //println!("{:#X?}", data);
             }
+            mb2::HeaderTagType::HybridRuntime => {
+                let mut data = mb2::HeaderHybridRuntime::default();
+                unsafe {
+                    sys_util::read_struct(kernel_image, &mut data)
+                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
+                }
+                //println!("{:#X?}", data);
+            }
             _ => {
                 println!("unhandled tag type: {:?}", tag.tag_type);
             }

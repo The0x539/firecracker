@@ -52,6 +52,7 @@ pub enum HeaderTagType {
     EntryAddressEfi32 = 8,
     EntryAddressEfi64 = 9,
     Relocatable = 10,
+    HybridRuntime = 0xF00D,
 }
 impl Default for HeaderTagType {
     fn default() -> Self { HeaderTagType::End }
@@ -159,6 +160,17 @@ pub struct HeaderRelocatable {
     pub max_addr: u32,
     pub alignment: u32,
     pub preference: LoadPreference,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct HeaderHybridRuntime {
+    pub flags: u64,
+    pub gpa_map_req: u64,
+    pub hrt_hihalf_offset: u64,
+    pub nautilus_entry_gva: u64,
+    pub comm_page_gpa: u64,
+    pub int_vec: u64,
 }
 
 #[repr(C)]
