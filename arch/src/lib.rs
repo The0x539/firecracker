@@ -9,6 +9,8 @@ extern crate libc;
 extern crate arch_gen;
 extern crate memory_model;
 
+extern crate bitfield;
+
 use std::result;
 
 #[derive(Debug)]
