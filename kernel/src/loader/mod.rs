@@ -92,15 +92,15 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemory,
     kernel_image: &mut F,
     start_address: usize,
-) -> Result<(GuestAddress, bool)>
+) -> Result<(GuestAddress, bool, Option<mb2::HeaderHybridRuntime>)>
 where
     F: Read + Seek,
 {
     let mb_hdr_addr = find_mb2_header(kernel_image)
         .map_err(|_| Error::ReadKernelImage)?;
     match mb_hdr_addr {
-        None => load_elf_kernel(guest_mem, kernel_image, start_address).map(|x| (x, false)),
-        Some(addr) => load_mb2_kernel(guest_mem, kernel_image, start_address, addr).map(|x| (x, true)),
+        None => load_elf_kernel(guest_mem, kernel_image, start_address).map(|x| (x, false, None)),
+        Some(addr) => load_mb2_kernel(guest_mem, kernel_image, start_address, addr).map(|(x, y)| (x, true, y)),
     }
 }
 
@@ -144,12 +144,14 @@ fn load_mb2_kernel<F>(
     kernel_image: &mut F,
     start_address: usize,
     mb2_location: usize,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, Option<mb2::HeaderHybridRuntime>)>
 where
     F: Read + Seek,
 {
     let mut opt_load_addrs: Option<mb2::HeaderAddress> = None;
     let mut opt_entry_addr: Option<GuestAddress> = None;
+
+    let mut opt_hrt_tag: Option<mb2::HeaderHybridRuntime> = None;
 
     let mut offset = mb2_location + mem::size_of::<mb2::Header>();
     loop {
@@ -192,6 +194,7 @@ where
                     sys_util::read_struct(kernel_image, &mut data)
                         .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
                 }
+                opt_hrt_tag = Some(data);
                 //println!("{:#X?}", data);
             }
             _ => {
@@ -245,9 +248,9 @@ where
         .read_to_memory(bss_addr, &mut Zeroes(), bss_len)
         .map_err(|_| Error::ReadKernelImage)?;
 
-    //println!("Multiboot2 kernel loaded into guest memory!");
+    //println!("Multiboot2 kernel loaded into guest memory! entry point: {:#X}", entry_addr.0);
     
-    Ok(entry_addr)
+    Ok((entry_addr, opt_hrt_tag))
 }
 
 /// Loads a kernel from a vmlinux elf image to a slice

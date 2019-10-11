@@ -79,6 +79,8 @@ use kernel::cmdline as kernel_cmdline;
 use kernel::loader as kernel_loader;
 use logger::error::LoggerError;
 #[cfg(target_arch = "x86_64")]
+use arch::x86_64::multiboot2 as mb2;
+#[cfg(target_arch = "x86_64")]
 use logger::LogOption;
 use logger::{AppInfo, Level, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory};
@@ -712,6 +714,8 @@ struct KernelConfig {
     kernel_file: File,
     #[cfg(target_arch = "x86_64")]
     cmdline_addr: GuestAddress,
+    #[cfg(target_arch = "x86_64")]
+    hrt_header: Option<mb2::HeaderHybridRuntime>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     is_multiboot: bool,
 }
@@ -1301,7 +1305,7 @@ impl Vmm {
             memory_model::GuestMemoryError::MemoryNotInitialized,
         ))?;
 
-        let (entry_addr, is_multiboot) = kernel_loader::load_kernel(
+        let (entry_addr, is_multiboot, opt_hrt_hdr) = kernel_loader::load_kernel(
             vm_memory,
             &mut kernel_config.kernel_file,
             arch::get_kernel_start(),
@@ -1311,6 +1315,7 @@ impl Vmm {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             kernel_config.is_multiboot = is_multiboot;
+            kernel_config.hrt_header = opt_hrt_hdr;
         }
 
         // This is x86_64 specific since on aarch64 the commandline will be specified through the FDT.
@@ -1674,6 +1679,8 @@ impl Vmm {
             cmdline_addr: GuestAddress(arch::x86_64::layout::CMDLINE_START),
             #[cfg(target_arch = "x86_64")]
             is_multiboot: false,
+            #[cfg(target_arch = "x86_64")]
+            hrt_header: None,
         };
         self.configure_kernel(kernel_config);
 
