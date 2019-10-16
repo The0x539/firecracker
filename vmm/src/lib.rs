@@ -1229,7 +1229,7 @@ impl Vmm {
             let io_bus = self.legacy_device_manager.io_bus.clone();
             let mut vcpu = Vcpu::new(cpu_id, &self.vm, io_bus, request_ts.clone())
                 .map_err(StartMicrovmError::Vcpu)?;
-            vcpu.configure(&self.vm_config, entry_addr, &self.vm, kernel_config.is_multiboot)
+            vcpu.configure(&self.vm_config, entry_addr, &self.vm, kernel_config.is_multiboot, kernel_config.hrt_header)
                 .map_err(StartMicrovmError::VcpuConfigure)?;
             vcpus.push(vcpu);
         }
