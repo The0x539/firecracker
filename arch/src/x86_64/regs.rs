@@ -514,7 +514,26 @@ fn hrt_setup_page_tables(
         return Ok(l1_start);
     }
 
-    println!("I wasn't expecting to get here.");
+    'outer: for i in 0..num_l4 {
+        let pt_gva = min_gva + i*L3_UNIT;
+        let pt_gpa = min_gpa.unchecked_add(i*L3_UNIT);
+
+        for j in 0..512 {
+            let cur_gva = pt_gva + j*L3_UNIT;
+            let cur_gpa = pt_gpa.unchecked_add(j*L4_UNIT);
+
+            if cur_gpa >= max_gpa {
+                break 'outer;
+            }
+
+            let mut pte = pml4::PTe(0x0);
+            pte.set_present(true);
+            pte.set_writable(true);
+            pte.set_page_base_addr(page_align(cur_gpa).0 as u64);
+            mem.write_obj_at_addr(pte.0, l4_start.unchecked_add(512*i + 8*j));
+            println!("PT[{}][{}] -> {:#x} gva={:#X} gpa={:#X}", i, j, pte.page_base_addr(), cur_gva, cur_gpa.0);
+        }
+    }
     
     Ok(l1_start)
 }
