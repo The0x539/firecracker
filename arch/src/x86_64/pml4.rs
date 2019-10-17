@@ -64,7 +64,7 @@ bitfield! {
 }
 
 bitfield! {
-    struct PTe(u64);
+    pub struct PTe(u64);
     pub present, set_present: 0;
     pub writable, set_writable: 1;
     pub user_page, set_user_page: 2;
