@@ -27,6 +27,8 @@ const L3_UNIT: usize = L4_UNIT * 512;
 const L2_UNIT: usize = L3_UNIT * 512;
 const L1_UNIT: usize = L2_UNIT * 512;
 
+const HRT_HIHALF_OFFSET: usize = 0xFFFF_8000_0000_0000;
+
 
 #[derive(Debug)]
 pub enum Error {
@@ -109,11 +111,13 @@ pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64, is_multiboot: bool) -> Result<()>
 fn mb_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
     let regs: kvm_regs = kvm_regs {
         rflags: 0x0000_0000_0000_0002u64, // copied from linux ver???
-        rip: boot_ip,
+        rip: boot_ip + 0xFFFF800000000000,
         rax: 0x36d76289,
         rbx: super::layout::ZERO_PAGE_START as u64,
         ..Default::default()
     };
+
+    println!("rip: {:#X}", regs.rip);
 
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
@@ -182,9 +186,6 @@ fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, hrt_header: Option<mb2::Head
         },
         None => ()
     }
-    sregs.cr4 &= !X86_CR4_PAE;
-    sregs.cr0 &= !X86_CR0_PG;
-    sregs.cr0 |= X86_CR0_PE;
 
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
@@ -200,6 +201,8 @@ const EFER_LME: u64 = 0x100;
 const X86_CR0_PE: u64 = 0x1;
 const X86_CR0_PG: u64 = 0x8000_0000;
 const X86_CR4_PAE: u64 = 0x20;
+const X86_CR4_PGE: u64 = 0x80;
+const X86_CR4_PSE: u64 = 0x10;
 
 fn write_gdt_table(table: &[u64], guest_mem: &GuestMemory) -> Result<()> {
     let boot_gdt_addr = GuestAddress(BOOT_GDT_OFFSET);
@@ -275,6 +278,32 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     //write_idt_value(0, mem)?;
     //sregs.idt.base = BOOT_IDT_OFFSET as u64;
     //sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
+    
+    //mem.write_obj_at_addr(0x0 as u64, idt_loc)
+    //    .map_err(|_| Error::WriteIDT)?;
+    
+    /*
+
+    let idt_loc: GuestAddress = page_align(
+        page_align(mem.end_addr())
+        .checked_sub(2*PAGE_SIZE)
+        .ok_or(Error::WritePML4Address)?
+        );
+
+    let idt_seg = kvm_segment {
+        base: idt_loc.0 as u64,
+        limit: 0xffffffff,
+        selector: 0,
+        type_: 0,
+        present: 0,
+        dpl: 0,
+        l: 0,
+        ..Default::default()
+    };
+
+    println!("idt @ {:#X}", idt_loc.0);
+
+    */
 
     let code_seg = kvm_segment {
         base: 0x0,
@@ -313,9 +342,12 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     //sregs.tr = tss_seg;
 
     /* 64-bit protected mode */
-    //no
-    sregs.cr0 |= X86_CR0_PE;
+    //sregs.cr0 |= X86_CR0_PE | X86_CR0_PG;
+    //sregs.cr4 |= X86_CR4_PAE | X86_CR4_PGE | X86_CR4_PSE;
     //sregs.efer |= EFER_LME | EFER_LMA;
+    sregs.cr0 = 0x80010001;
+    sregs.cr4 = 0xb0;
+    sregs.efer = 0x1d00;
 
     Ok(())
 }
@@ -372,7 +404,7 @@ fn hrt_setup_page_tables(
     let min_gva = hrt_header.hrt_hihalf_offset as usize;
     let max_gva = min_gva + max_gpa.0;
 
-    println!("min_gpa = {:#X}\nmax_gpa = {:#X}\nmin_gva = {:#X}\nmax_gva = {:#X}\n", min_gpa.0, max_gpa.0, min_gva, max_gva);
+    println!("min_gpa = {:#X}\nmax_gpa = {:#X}\nmin_gva = {:#X}\nmax_gva = {:#X}", min_gpa.0, max_gpa.0, min_gva, max_gva);
 
     let paging_level = {
         if hrt_header.flags.map_512gb() {
@@ -398,7 +430,7 @@ fn hrt_setup_page_tables(
     let l3_start = l2_start.unchecked_add(4096 * num_l2);
     let l4_start = l3_start.unchecked_add(4096 * num_l3);
 
-    println!("PDP @ {:#X}\nPDP @ {:#X}\nPD @ {:#X}\nPT @ {:#X}", l1_start.0, l2_start.0, l3_start.0, l4_start.0);
+    println!("PML4 @ {:#X}\nPDP @ {:#X}\nPD @ {:#X}\nPT @ {:#X}", l1_start.0, l2_start.0, l3_start.0, l4_start.0);
 
     for i in 0..512 {
         mem.write_obj_at_addr(0x0, l1_start.unchecked_add(i * 8));
@@ -407,7 +439,7 @@ fn hrt_setup_page_tables(
     let pml4_range = {
         if min_gva == 0x0 {
             0..num_l2
-        } else if min_gva == 0xFFFF_8000_0000_0000 {
+        } else if min_gva == HRT_HIHALF_OFFSET {
             256..256+num_l2
         } else {
             println!("error: unsupported gva offset");
@@ -429,9 +461,9 @@ fn hrt_setup_page_tables(
             PagingLevel::Colossal => page_align(cur_gpa),
             _ => page_align(l2_start.unchecked_add(j * PAGE_SIZE))
         };
-        pml4e.set_pdp_base_addr(pdp_base_addr.0 as u64);
+        pml4e.set_pdp_base_addr(pdp_base_addr.0 as u64 >> 12);
         mem.write_obj_at_addr(pml4e.0, l1_start.unchecked_add(i * 8));
-        println!("PML4[{}] -> {:#X} gva={:#X} gpa={:#X}", i, pdp_base_addr.0, cur_gva, cur_gpa.0);
+        println!("PML4[{}] @ {:#X} -> {:#X} gva={:#X} gpa={:#X}",  i, l1_start.unchecked_add(i*8).0, pml4e.pdp_base_addr(), cur_gva, cur_gpa.0);
     }
 
     if paging_level == PagingLevel::Colossal {
@@ -466,9 +498,9 @@ fn hrt_setup_page_tables(
 
             pdpe.set_1gb(paging_level == PagingLevel::Huge);
 
-            pdpe.set_pd_base_addr(pd_base_addr.0 as u64);
+            pdpe.set_pd_base_addr(pd_base_addr.0 as u64 >> 12);
             mem.write_obj_at_addr(pdpe.0, l2_start.unchecked_add(512*i + 8*j));
-            println!("PDP[{}][{}] -> {:#X} gva={:#X} gpa={:#X} huge={}", i, j, pd_base_addr.0, cur_gva, cur_gpa.0, pdpe.is_1gb());
+            println!("PDP[{}][{}] -> {:#X} gva={:#X} gpa={:#X} huge={}", i, j, pdpe.pd_base_addr(), cur_gva, cur_gpa.0, pdpe.is_1gb());
         }
     }
 
@@ -504,9 +536,9 @@ fn hrt_setup_page_tables(
 
             pde.set_2mb(paging_level == PagingLevel::Large);
 
-            pde.set_pt_base_addr(pt_base_addr.0 as u64);
+            pde.set_pt_base_addr(pt_base_addr.0 as u64 >> 12);
             mem.write_obj_at_addr(pde.0, l3_start.unchecked_add(512*i + 8*j));
-            println!("PD[{}][{}] -> {:#X} gva={:#X} gpa={:#X} large={}", i, j, pt_base_addr.0, cur_gva, cur_gpa.0, pde.is_2mb());
+            println!("PD[{}][{}] -> {:#X} gva={:#X} gpa={:#X} large={}", i, j, pde.pt_base_addr(), cur_gva, cur_gpa.0, pde.is_2mb());
         }
     }
 
@@ -529,7 +561,7 @@ fn hrt_setup_page_tables(
             let mut pte = pml4::PTe(0x0);
             pte.set_present(true);
             pte.set_writable(true);
-            pte.set_page_base_addr(page_align(cur_gpa).0 as u64);
+            pte.set_page_base_addr(page_align(cur_gpa).0 as u64 >> 12);
             mem.write_obj_at_addr(pte.0, l4_start.unchecked_add(512*i + 8*j));
             println!("PT[{}][{}] -> {:#x} gva={:#X} gpa={:#X}", i, j, pte.page_base_addr(), cur_gva, cur_gpa.0);
         }
