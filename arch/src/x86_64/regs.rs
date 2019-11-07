@@ -204,6 +204,18 @@ const X86_CR4_PAE: u64 = 0x20;
 const X86_CR4_PGE: u64 = 0x80;
 const X86_CR4_PSE: u64 = 0x10;
 
+fn write_gdt_table_at_addr(table: &[u64], guest_mem: &GuestMemory, boot_gdt_addr: GuestAddress) -> Result<()> {
+    for (index, entry) in table.iter().enumerate() {
+        let addr = guest_mem
+            .checked_offset(boot_gdt_addr, index * mem::size_of::<u64>())
+            .ok_or(Error::WriteGDT)?;
+        guest_mem
+            .write_obj_at_addr(*entry, addr)
+            .map_err(|_| Error::WriteGDT)?;
+    }
+    Ok(())
+}
+
 fn write_gdt_table(table: &[u64], guest_mem: &GuestMemory) -> Result<()> {
     let boot_gdt_addr = GuestAddress(BOOT_GDT_OFFSET);
     for (index, entry) in table.iter().enumerate() {
@@ -261,11 +273,24 @@ fn configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Res
 }
 
 fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {
+    /*
     let gdt_table: [u64; 3 as usize] = [
         gdt_entry(0, 0, 0),               // NULL
-        gdt_entry(0xcf9a, 0, 0xffff), // CODE
-        gdt_entry(0xcf92, 0, 0xffff), // DATA
+        gdt_entry(0xa09a, 0, 0), // CODE
+        gdt_entry(0xa092, 0, 0), // DATA
     ];
+    */
+
+    let gdt_table: [u64; 3 as usize] = [
+        0x0000000000000000, /* null */
+        0x00a09a0000000000, /* code (note lme bit) */
+        0x00a0920000000000, /* data (most entries don't matter) */
+    ];
+
+    let gdt_loc = page_align(GuestAddress(mem.end_addr().0 - 3*4096));
+    write_gdt_table_at_addr(&gdt_table[..], mem, gdt_loc)?;
+    sregs.gdt.base = gdt_loc.0 as u64;
+    sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
 
     //let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
     //let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
