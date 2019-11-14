@@ -358,13 +358,27 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
         ..Default::default()
     };
 
+    let tss_loc = page_align(GuestAddress(mem.end_addr().0 - 4*4096));
+
+    let tss_seg = kvm_segment {
+        selector: 0,
+        base: (tss_loc.0 + HRT_HIHALF_OFFSET) as u64,
+        limit: 4095,
+        type_: 0x9,
+        s: 0,
+        dpl: 0,
+        present: 1,
+        l: 0,
+        ..Default::default()
+    };
+
     sregs.cs = code_seg;
     sregs.ds = data_seg;
     sregs.es = data_seg;
     sregs.fs = data_seg;
     sregs.gs = data_seg;
     sregs.ss = data_seg;
-    //sregs.tr = tss_seg;
+    sregs.tr = tss_seg;
 
     /* 64-bit protected mode */
     //sregs.cr0 |= X86_CR0_PE | X86_CR0_PG;
