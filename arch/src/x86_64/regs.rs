@@ -27,6 +27,7 @@ const L3_UNIT: usize = L4_UNIT * 512;
 const L2_UNIT: usize = L3_UNIT * 512;
 const L1_UNIT: usize = L2_UNIT * 512;
 
+const HRT_GVA_OFFSET: usize = 0xFFFF_8000_0000_0000;
 
 #[derive(Debug)]
 pub enum Error {
@@ -109,11 +110,13 @@ pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64, is_multiboot: bool) -> Result<()>
 fn mb_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
     let regs: kvm_regs = kvm_regs {
         rflags: 0x0000_0000_0000_0002u64, // copied from linux ver???
-        rip: boot_ip,
+        rip: boot_ip /*+ HRT_GVA_OFFSET as u64*/,
         rax: 0x36d76289,
         rbx: super::layout::ZERO_PAGE_START as u64,
         ..Default::default()
     };
+    
+    println!("{:#X?}", regs);
 
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
@@ -181,9 +184,6 @@ fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, hrt_header: Option<mb2::Head
         },
         None => ()
     }
-    sregs.cr4 &= !X86_CR4_PAE;
-    sregs.cr0 &= !X86_CR0_PG;
-    sregs.cr0 |= X86_CR0_PE;
 
     println!("{:#X?}", sregs);
 
@@ -259,6 +259,7 @@ fn configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Res
 }
 
 fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {
+    /*
     let gdt_table: [u64; 3 as usize] = [
         gdt_entry(0, 0, 0),               // NULL
         gdt_entry(0xcf9a, 0, 0xffff), // CODE
@@ -317,6 +318,44 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     //no
     sregs.cr0 |= X86_CR0_PE;
     //sregs.efer |= EFER_LME | EFER_LMA;
+    */
+    
+    let code_seg = kvm_segment {
+        base: 0x0,
+        limit: 0xFFFFFFFF,
+        selector: 0x8,
+        type_: 0xa,
+        present: 1,
+        dpl: 0,
+        db: 1,
+        s: 1,
+        l: 0,
+        g: 1,
+        ..Default::default()
+    };
+
+    let data_seg = kvm_segment {
+        base: 0x0,
+        limit: 0xFFFFFFFF,
+        selector: 0x10,
+        type_: 0x2,
+        present: 1,
+        s: 1,
+        dpl: 0,
+        l: 0,
+        db: 1,
+        g: 1,
+        ..Default::default()
+    };
+
+    sregs.cs = code_seg;
+    sregs.ds = data_seg;
+    sregs.es = data_seg;
+    sregs.fs = data_seg;
+    sregs.gs = data_seg;
+    sregs.ss = data_seg;
+
+    sregs.cr0 |= X86_CR0_PE;
 
     Ok(())
 }
@@ -408,7 +447,7 @@ fn hrt_setup_page_tables(
     let pml4_range = {
         if min_gva == 0x0 {
             0..num_l2
-        } else if min_gva == 0xFFFF_8000_0000_0000 {
+        } else if min_gva == HRT_GVA_OFFSET {
             256..256+num_l2
         } else {
             println!("error: unsupported gva offset");
@@ -433,7 +472,7 @@ fn hrt_setup_page_tables(
         pml4e.set_pdp_base_addr(pdp_base_addr.0 as u64);
         let entry_loc = l1_start.unchecked_add(i * 8);
         mem.write_obj_at_addr(pml4e.0, entry_loc);
-        println!("PML4[{}] @ {:#X} -> {:#X} (gva={:#X} -> gpa={:#X})", i, entry_loc.0, pdp_base_addr.0, cur_gva, cur_gpa.0);
+        println!("PML4[{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, entry_loc.0, pdp_base_addr.0, cur_gva, cur_gpa.0);
     }
 
     if paging_level == PagingLevel::Colossal {
