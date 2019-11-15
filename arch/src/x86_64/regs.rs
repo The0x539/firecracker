@@ -178,13 +178,14 @@ fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, hrt_header: Option<mb2::Head
         Some(hdr) => {
             let base = hrt_setup_page_tables(mem, &mut sregs, hdr)?;
             sregs.cr3 = base.0 as u64;
-            println!("CR3 = {:#X}", sregs.cr3);
         },
         None => ()
     }
     sregs.cr4 &= !X86_CR4_PAE;
     sregs.cr0 &= !X86_CR0_PG;
     sregs.cr0 |= X86_CR0_PE;
+
+    println!("{:#X?}", sregs);
 
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
@@ -372,7 +373,7 @@ fn hrt_setup_page_tables(
     let min_gva = hrt_header.hrt_hihalf_offset as usize;
     let max_gva = min_gva + max_gpa.0;
 
-    println!("min_gpa = {:#X}\nmax_gpa = {:#X}\nmin_gva = {:#X}\nmax_gva = {:#X}\n", min_gpa.0, max_gpa.0, min_gva, max_gva);
+    println!("guest phys mem: {:#X} - {:#X}\nguest virt mem: {:#X} - {:#X}", min_gpa.0, max_gpa.0, min_gva, max_gva);
 
     let paging_level = {
         if hrt_header.flags.map_512gb() {
@@ -398,7 +399,7 @@ fn hrt_setup_page_tables(
     let l3_start = l2_start.unchecked_add(4096 * num_l2);
     let l4_start = l3_start.unchecked_add(4096 * num_l3);
 
-    println!("PDP @ {:#X}\nPDP @ {:#X}\nPD @ {:#X}\nPT @ {:#X}", l1_start.0, l2_start.0, l3_start.0, l4_start.0);
+    println!("PML4 @ {:#X}, PDP @ {:#X}, PD @ {:#X}, PT @ {:#X}", l1_start.0, l2_start.0, l3_start.0, l4_start.0);
 
     for i in 0..512 {
         mem.write_obj_at_addr(0x0, l1_start.unchecked_add(i * 8));
@@ -430,8 +431,9 @@ fn hrt_setup_page_tables(
             _ => page_align(l2_start.unchecked_add(j * PAGE_SIZE))
         };
         pml4e.set_pdp_base_addr(pdp_base_addr.0 as u64);
-        mem.write_obj_at_addr(pml4e.0, l1_start.unchecked_add(i * 8));
-        println!("PML4[{}] -> {:#X} gva={:#X} gpa={:#X}", i, pdp_base_addr.0, cur_gva, cur_gpa.0);
+        let entry_loc = l1_start.unchecked_add(i * 8);
+        mem.write_obj_at_addr(pml4e.0, entry_loc);
+        println!("PML4[{}] @ {:#X} -> {:#X} (gva={:#X} -> gpa={:#X})", i, entry_loc.0, pdp_base_addr.0, cur_gva, cur_gpa.0);
     }
 
     if paging_level == PagingLevel::Colossal {
@@ -467,8 +469,9 @@ fn hrt_setup_page_tables(
             pdpe.set_1gb(paging_level == PagingLevel::Huge);
 
             pdpe.set_pd_base_addr(pd_base_addr.0 as u64);
-            mem.write_obj_at_addr(pdpe.0, l2_start.unchecked_add(512*i + 8*j));
-            println!("PDP[{}][{}] -> {:#X} gva={:#X} gpa={:#X} huge={}", i, j, pd_base_addr.0, cur_gva, cur_gpa.0, pdpe.is_1gb());
+            let entry_loc = l2_start.unchecked_add(512*i + 8*j);
+            mem.write_obj_at_addr(pdpe.0, entry_loc);
+            println!("PDP[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X}, huge={})", i, j, entry_loc.0, pd_base_addr.0, cur_gva, cur_gpa.0, pdpe.is_1gb());
         }
     }
 
@@ -505,8 +508,9 @@ fn hrt_setup_page_tables(
             pde.set_2mb(paging_level == PagingLevel::Large);
 
             pde.set_pt_base_addr(pt_base_addr.0 as u64);
-            mem.write_obj_at_addr(pde.0, l3_start.unchecked_add(512*i + 8*j));
-            println!("PD[{}][{}] -> {:#X} gva={:#X} gpa={:#X} large={}", i, j, pt_base_addr.0, cur_gva, cur_gpa.0, pde.is_2mb());
+            let entry_loc = l3_start.unchecked_add(512*i + 8*j);
+            mem.write_obj_at_addr(pde.0, entry_loc);
+            println!("PD[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X}, large={})", i, j, entry_loc.0, pt_base_addr.0, cur_gva, cur_gpa.0, pde.is_2mb());
         }
     }
 
@@ -530,8 +534,9 @@ fn hrt_setup_page_tables(
             pte.set_present(true);
             pte.set_writable(true);
             pte.set_page_base_addr(page_align(cur_gpa).0 as u64);
-            mem.write_obj_at_addr(pte.0, l4_start.unchecked_add(512*i + 8*j));
-            println!("PT[{}][{}] -> {:#x} gva={:#X} gpa={:#X}", i, j, pte.page_base_addr(), cur_gva, cur_gpa.0);
+            let entry_loc = l4_start.unchecked_add(512*i + 8*j);
+            mem.write_obj_at_addr(pte.0, entry_loc);
+            println!("PT[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pte.page_base_addr(), cur_gva, cur_gpa.0);
         }
     }
     
