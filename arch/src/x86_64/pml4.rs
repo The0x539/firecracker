@@ -103,7 +103,7 @@ bitfield! {
 
 }
 impl LegacyPDe {
-    fn page_base_addr(&self) -> u33 {
+    fn page_base_addr(&self) -> u32 {
         (self.page_base_addr_hi() << 10) | (self.page_base_addr_lo())
     }
     fn set_page_base_addr(&mut self, val: u32) {
