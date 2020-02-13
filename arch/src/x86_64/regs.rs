@@ -358,7 +358,7 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     sregs.gs = data_seg;
     sregs.ss = data_seg;
 
-    sregs.cr0 |= X86_CR0_PE;
+    sregs.cr0 |= X86_CR0_PE | X86_CR0_PG;
 
     Ok(())
 }
@@ -452,11 +452,11 @@ fn hrt_setup_legacy_page_tables(
         
         pde.set_4mb(false);
     
-        pde.set_pt_base_addr(pt_base_addr.0 as u32);
+        pde.set_pt_base_addr(pt_base_addr.0 as u32 >> 12);
         let entry_loc = pd_start.unchecked_add(4 * i);
 
         mem.write_obj_at_addr(pde.0, entry_loc);
-        println!("PD[{}] @ {:#X} -> {:#X} ({:#X} -> {:#X}, large={})", i, entry_loc.0, pt_base_addr.0, cur_addr, cur_addr, pde.is_4mb());
+        println!("PD[{}] @ {:#X} -> {:#X} ({:#X} -> {:#X}, large={})", i, entry_loc.0, pde.pt_base_addr(), cur_addr, cur_addr, pde.is_4mb());
     }
 
     'outer: for i in 0..num_pt {
