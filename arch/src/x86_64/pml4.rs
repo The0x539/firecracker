@@ -127,6 +127,52 @@ bitfield! {
     pub page_base_addr, set_page_base_addr: 31, 12;
 }
 
+bitfield! {
+    pub struct PAE_PDPe(u64);
+    pub present, set_present: 0;
+    // mbz, _: 2, 1;
+    pub write_through, set_write_through: 3;
+    pub cache_disable, set_cache_disable: 4;
+    // mbz, _: 8, 5;
+    pub available, set_available: 11, 9;
+    pub pd_base_addr, set_pd_base_addr: 51, 12;
+    // mbz, _: 63, 52;
+}
+
+bitfield! {
+    pub struct PAE_PDe(u64);
+    pub present, set_present: 0;
+    pub writable, set_writable: 1;
+    pub user_page, set_user_page: 2;
+    pub write_through, set_write_through: 3;
+    pub cache_disable, set_cache_disable: 4;
+    pub accessed, set_accessed: 5;
+    // IGN: 6;
+    // mbz: 7;
+    // ign: 8;
+    pub available, set_available: 11, 9;
+    pub pt_base_addr, set_pt_base_addr: 51, 12;
+    // reserved: 62, 52;
+    pub no_execute, set_no_execute: 63;
+}
+
+bitfield! {
+    pub struct PAE_PTe(u64);
+    pub present, set_present: 0;
+    pub writable, set_writable: 1;
+    pub user_page, set_user_page: 2;
+    pub write_through, set_write_through: 3;
+    pub cache_disable, set_cache_disable: 4;
+    pub accessed, set_accessed: 5;
+    pub dirty, set_dirty: 6;
+    pub pat, set_pat: 7;
+    pub global, set_global: 8;
+    pub available, set_available: 11, 9;
+    pub page_base_addr, set_page_base_addr: 51, 12;
+    // reserved: 62, 52;
+    pub no_execute, set_no_execute: 63;
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum PagingLevel {
     Normal,
