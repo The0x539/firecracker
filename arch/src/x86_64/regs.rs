@@ -117,7 +117,7 @@ pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64, is_multiboot: bool) -> Result<()>
 fn mb_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
     let regs: kvm_regs = kvm_regs {
         rflags: 0x0000_0000_0000_0002u64, // copied from linux ver???
-        rip: boot_ip /*+ HRT_GVA_OFFSET as u64*/,
+        rip: boot_ip + HRT_GVA_OFFSET as u64,
         rax: 0x36d76289,
         rbx: super::layout::ZERO_PAGE_START as u64,
         ..Default::default()
@@ -222,8 +222,26 @@ fn write_gdt_table(table: &[u64], guest_mem: &GuestMemory) -> Result<()> {
     Ok(())
 }
 
+fn write_gdt_table_at_addr(table: &[u64], guest_mem: &GuestMemory, boot_gdt_addr: GuestAddress) -> Result<()> {
+    for (index, entry) in table.iter().enumerate() {
+        let addr = guest_mem
+            .checked_offset(boot_gdt_addr, index * mem::size_of::<u64>())
+            .ok_or(Error::WriteGDT)?;
+        guest_mem
+            .write_obj_at_addr(*entry, addr)
+            .map_err(|_| Error::WriteGDT)?;
+    }
+    Ok(())
+}
+
 fn write_idt_value(val: u64, guest_mem: &GuestMemory) -> Result<()> {
     let boot_idt_addr = GuestAddress(BOOT_IDT_OFFSET);
+    guest_mem
+        .write_obj_at_addr(val, boot_idt_addr)
+        .map_err(|_| Error::WriteIDT)
+}
+
+fn write_idt_value_at_addr(val: u64, guest_mem: &GuestMemory, boot_idt_addr: GuestAddress) -> Result<()> {
     guest_mem
         .write_obj_at_addr(val, boot_idt_addr)
         .map_err(|_| Error::WriteIDT)
@@ -266,52 +284,29 @@ fn configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Res
 }
 
 fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {
-    /*
     let gdt_table: [u64; 3 as usize] = [
-        gdt_entry(0, 0, 0),               // NULL
-        gdt_entry(0xcf9a, 0, 0xffff), // CODE
-        gdt_entry(0xcf92, 0, 0xffff), // DATA
+        gdt_entry(0, 0, 0),
+        gdt_entry(0xa09a, 0, 0xffffffff),
+        gdt_entry(0xa092, 0, 0xffffffff),
     ];
 
-    //let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
-    //let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+    let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
+    let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+    
+    let end_addr = mem.end_addr();
+    let end_page = page_align(end_addr);
 
-    // Write segments
-    //write_gdt_table(&gdt_table[..], mem)?;
-    //sregs.gdt.base = BOOT_GDT_OFFSET as u64;
+    let gdt_loc = end_page.0 - 3*4096;
+    write_gdt_table_at_addr(&gdt_table[..], mem, GuestAddress(gdt_loc))?;
+    sregs.gdt.base = gdt_loc as u64;
     //sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
+    sregs.gdt.limit = 24;
 
-    //write_idt_value(0, mem)?;
-    //sregs.idt.base = BOOT_IDT_OFFSET as u64;
+    let idt_loc = end_page.0 - 2*4096;
+    write_idt_value_at_addr(0, mem, GuestAddress(idt_loc))?;
+    sregs.idt.base = idt_loc as u64;
     //sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
-
-    let code_seg = kvm_segment {
-        base: 0x0,
-        limit: 0xffffffff,
-        selector: 0x8,
-        type_: 0xa,
-        present: 1,
-        dpl: 0,
-        db: 1,
-        s: 1,
-        l: 0,
-        g: 1,
-        ..Default::default()
-    };
-
-    let data_seg = kvm_segment {
-        selector: 0x10,
-        base: 0x0,
-        limit: 0xffffffff,
-        type_: 0x2,
-        s: 1,
-        dpl: 0,
-        present: 1,
-        l: 0,
-        db: 1,
-        g: 1,
-        ..Default::default()
-    };
+    sregs.idt.limit = 16*256;
 
     sregs.cs = code_seg;
     sregs.ds = data_seg;
@@ -320,47 +315,6 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     sregs.gs = data_seg;
     sregs.ss = data_seg;
     //sregs.tr = tss_seg;
-
-    /* 64-bit protected mode */
-    //no
-    sregs.cr0 |= X86_CR0_PE;
-    //sregs.efer |= EFER_LME | EFER_LMA;
-    */
-    
-    let code_seg = kvm_segment {
-        base: 0x0,
-        limit: 0xFFFFFFFF,
-        selector: 0x8,
-        type_: 0xa,
-        present: 1,
-        dpl: 0,
-        db: 1,
-        s: 1,
-        l: 0,
-        g: 1,
-        ..Default::default()
-    };
-
-    let data_seg = kvm_segment {
-        base: 0x0,
-        limit: 0xFFFFFFFF,
-        selector: 0x10,
-        type_: 0x2,
-        present: 1,
-        s: 1,
-        dpl: 0,
-        l: 0,
-        db: 1,
-        g: 1,
-        ..Default::default()
-    };
-
-    sregs.cs = code_seg;
-    sregs.ds = data_seg;
-    sregs.es = data_seg;
-    sregs.fs = data_seg;
-    sregs.gs = data_seg;
-    sregs.ss = data_seg;
 
     sregs.cr0 |= X86_CR0_PE;
     sregs.cr0 |= X86_CR0_PG;
