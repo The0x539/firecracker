@@ -353,7 +353,7 @@ impl Vcpu {
         match self.fd.run() {
             Ok(run) => match run {
                 VcpuExit::IoOut(0x7C4, data) => {
-                    println!("output on magic port: {:#02X} {:02X} {:02X} {:02X}", data[3], data[2], data[3], data[0]);
+                    println!("output on magic port: {:#02X} {:02X} {:02X} {:02X}", data[3], data[2], data[1], data[0]);
                     Ok(())
                 }
                 VcpuExit::IoIn(addr, data) => {
