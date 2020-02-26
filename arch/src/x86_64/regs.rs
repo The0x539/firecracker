@@ -120,6 +120,7 @@ fn mb_setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
         rip: boot_ip + HRT_GVA_OFFSET as u64,
         rax: 0x36d76289,
         rbx: super::layout::ZERO_PAGE_START as u64,
+        rsp: 0x10004000 + HRT_GVA_OFFSET as u64, // maybe don't hardcode this
         ..Default::default()
     };
     
@@ -300,7 +301,7 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     write_gdt_table_at_addr(&gdt_table[..], mem, GuestAddress(gdt_loc))?;
     sregs.gdt.base = gdt_loc as u64;
     //sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
-    sregs.gdt.limit = 24;
+    sregs.gdt.limit = 24; // should maybe be 1 smaller
 
     let vmx_null_int_handler: [u8; 30] = [
         0x50,
@@ -354,7 +355,7 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     }
 
     sregs.idt.base = (idt_loc + HRT_GVA_OFFSET) as u64;
-    sregs.idt.limit = 16*256;
+    sregs.idt.limit = 16*256; // should maybe be 1 smaller
 
     sregs.cs = code_seg;
     sregs.ds = data_seg;
