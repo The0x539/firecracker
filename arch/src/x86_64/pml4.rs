@@ -173,6 +173,32 @@ bitfield! {
     pub no_execute, set_no_execute: 63;
 }
 
+bitfield! {
+    pub struct IDTe(u128);
+    u64;
+    offset_1, set_offset_1: 15, 0;
+    pub selector, set_selector: 31, 16;
+    pub ist, set_ist: 39, 32;
+    pub gate_type, set_gate_type: 43, 40;
+    // reserved: 44;
+    pub dpl, set_dpl: 46, 45;
+    pub present, set_present: 47;
+    offset_2, set_offset_2: 63, 48;
+    offset_3, set_offset_3: 95, 64;
+    // reserved: 127, 96;
+}
+impl IDTe {
+    pub fn offset(&self) -> u64 {
+        (self.offset_1() << 0) | (self.offset_2() << 16) | (self.offset_3() << 32)
+    }
+    pub fn set_offset(&mut self, val: u64) {
+        self.set_offset_1((val & 0x0000_0000_0000_FFFF) >> 0);
+        self.set_offset_2((val & 0x0000_0000_FFFF_0000) >> 16);
+        self.set_offset_3((val & 0xFFFF_FFFF_0000_0000) >> 32);
+    }
+}
+
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum PagingLevel {
     Normal,

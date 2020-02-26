@@ -44,6 +44,7 @@ data_init_type!(u8);
 data_init_type!(u16);
 data_init_type!(u32);
 data_init_type!(u64);
+data_init_type!(u128);
 data_init_type!(usize);
 data_init_type!(i8);
 data_init_type!(i16);

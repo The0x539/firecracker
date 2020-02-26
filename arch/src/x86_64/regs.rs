@@ -302,10 +302,58 @@ fn mb_configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut kvm_sregs) -> 
     //sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
     sregs.gdt.limit = 24;
 
+    let vmx_null_int_handler: [u8; 30] = [
+        0x50,
+        0x53,
+        0x51,
+        0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00,
+        0x00,
+        0x48, 0x8b, 0x5c, 0x24, 0x18,
+        0x48, 0x8b, 0x4c, 0x24, 0x20,
+        0x0f, 0x01, 0xc1,
+        0x59,
+        0x5b,
+        0x58,
+        0xf4,
+        0x48, 0xcf,
+    ];
+
     let idt_loc = end_page.0 - 2*4096;
-    write_idt_value_at_addr(0, mem, GuestAddress(idt_loc))?;
-    sregs.idt.base = idt_loc as u64;
-    //sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
+    let null_int_handler_loc = end_page.0 - 4096;
+
+    mem.write_obj_at_addr(vmx_null_int_handler, GuestAddress(null_int_handler_loc))
+       .map_err(|_| Error::WriteIDT)?;
+
+    let mut trap_gate = pml4::IDTe(0x0);
+    trap_gate.set_selector(0x8);
+    trap_gate.set_gate_type(0xf);
+    trap_gate.set_present(true);
+    println!("trap gate: {:#032X}", trap_gate.0);
+    trap_gate.set_offset((null_int_handler_loc + HRT_GVA_OFFSET) as u64);
+    println!("trap_gate: {:#032X}", trap_gate.0);
+    
+
+    println!("IDT[0..32] @ {:#X}..{:#X}: offset={:#X} selector={:#x} type={:#x} present={}", idt_loc+16*0, idt_loc+16*32, trap_gate.offset(), trap_gate.selector(), trap_gate.gate_type(), trap_gate.present());
+    for i in 0..32 {
+        mem.write_obj_at_addr(trap_gate.0, GuestAddress(idt_loc+16*i))
+           .map_err(|_| Error::WriteIDT)?;
+    }
+
+    let mut int_gate = pml4::IDTe(0x0);
+    int_gate.set_selector(0x8);
+    int_gate.set_gate_type(0xe);
+    int_gate.set_present(true);
+    println!("int gate: {:#032X}", int_gate.0);
+    int_gate.set_offset((null_int_handler_loc + HRT_GVA_OFFSET) as u64);
+    println!("int_gate: {:#032X}", int_gate.0);
+    
+    println!("IDT[32..256] @ {:#X}..{:#X}: offset={:#X} selector={:#x} type={:#x} present={}", idt_loc+16*32, idt_loc+16*256, int_gate.offset(), int_gate.selector(), int_gate.gate_type(), int_gate.present());
+    for i in 32..256 {
+        mem.write_obj_at_addr(int_gate.0, GuestAddress(idt_loc+16*i))
+           .map_err(|_| Error::WriteIDT)?;
+    }
+
+    sregs.idt.base = (idt_loc + HRT_GVA_OFFSET) as u64;
     sregs.idt.limit = 16*256;
 
     sregs.cs = code_seg;
