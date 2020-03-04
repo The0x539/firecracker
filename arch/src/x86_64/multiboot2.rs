@@ -13,6 +13,9 @@ pub const MOD_ALIGN: u32 = 0x00001000;
 pub const INFO_ALIGN: u32 = 0x00000008;
 
 pub const TAG_ALIGN: u32 = 0x00000008;
+
+pub const TAG_TYPE_HRT: u32 = 0xF00DF00D;
+
 #[repr(u16)]
 pub enum TagType {
     End = 0,
@@ -257,4 +260,20 @@ pub struct TagModules {
     pub mod_start: u32,
     pub mod_end: u32,
     pub string: [u8],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TagHybridRuntime {
+    pub base:                   InfoTag,
+    pub total_num_apics:        u32,
+    pub first_hrt_apic_id:      u32,
+    pub have_hrt_ioapic:        u32,
+    pub first_hrt_ioapic_entry: u32,
+    pub cpu_freq_khz:           u64,
+    pub hrt_flags:              u64,
+    pub max_mem_mapped:         u64,
+    pub first_hrt_gpa:          u64,
+    pub boot_state_gpa:         u64,
+    pub gva_offset:             u64,
 }

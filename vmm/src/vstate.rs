@@ -354,6 +354,34 @@ impl Vcpu {
             Ok(run) => match run {
                 VcpuExit::IoOut(0x7C4, data) => {
                     println!("output on magic port: {:#02X} {:02X} {:02X} {:02X}", data[3], data[2], data[1], data[0]);
+                    let regs: kvm_bindings::kvm_regs = match self.fd.get_regs() {
+                        Ok(x) => x,
+                        Err(_) => {
+                            println!("couldn't get regs");
+                            return Err(Error::VcpuUnhandledKvmExit);
+                        },
+                    };
+                    match regs.rax {
+                        0x0 => { // null
+                            println!("hvm: received hypercall {hcall:x} \
+                                      rax={rax:#x} \
+                                      rbx={rbx:#x} \
+                                      rcx={rcx:#x} \
+                                      at cycle count {ccount} \
+                                      ({lastcount} cycles since last boot start) \
+                                      num_exits={nexits} since initial boot",
+                                     hcall=regs.rax,
+                                     rax=regs.rax, rbx=regs.rbx, rcx=regs.rcx,
+                                     ccount=0xaaaa,
+                                     lastcount=0xbbbb,
+                                     nexits=0xcccc);
+                        },
+                        n => println!("hvm: unknown hypercall {:#x}", n),
+                    }
+                    Ok(())
+                }
+                VcpuExit::IoOut(0xC0C0, data) => {
+                    print!("{}", data[0] as char);
                     Ok(())
                 }
                 VcpuExit::IoIn(addr, data) => {
@@ -392,6 +420,17 @@ impl Vcpu {
                 }
                 VcpuExit::Shutdown => {
                     info!("Received KVM_EXIT_SHUTDOWN signal");
+                    let regs: kvm_bindings::kvm_regs = match self.fd.get_regs() {
+                        Ok(x) => x,
+                        Err(_) => {
+                            println!("couldn't get regs");
+                            return Err(Error::VcpuUnhandledKvmExit);
+                        },
+                    };
+                    println!("rip: {:#x}", regs.rip);
+                    println!("rax: {:#x}", regs.rax);
+                    println!("rsp: {:#x}", regs.rsp);
+
                     Err(Error::VcpuUnhandledKvmExit)
                 }
                 // Documentation specifies that below kvm exits are considered

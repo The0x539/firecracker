@@ -28,6 +28,11 @@ use arch_gen::x86::multiboot2::{
     MULTIBOOT_TAG_TYPE_BASIC_MEMINFO as MB_TAG_TYPE_BASIC_MEMINFO,
     MULTIBOOT_TAG_TYPE_MMAP as MB_TAG_TYPE_MMAP,
 };
+use self::multiboot2::{
+    TagHybridRuntime as mb_tag_hrt,
+    TAG_TYPE_HRT as MB_TAG_TYPE_HRT,
+};
+use self::mb2;
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
@@ -45,6 +50,8 @@ struct MbMeminfoWrapper(mb_tag_basic_meminfo);
 struct MbMmapWrapper(mb_tag_mmap);
 #[derive(Copy, Clone)]
 struct MbEntryWrapper(mb_mmap_entry);
+#[derive(Copy, Clone)]
+struct MbTagHrtWrapper(mb_tag_hrt);
 
 // It is safe to initialize BootParamsWrap which is a wrapper over `boot_params` (a series of ints).
 unsafe impl DataInit for BootParamsWrapper {}
@@ -52,6 +59,7 @@ unsafe impl DataInit for MbTagWrapper {}
 unsafe impl DataInit for MbMeminfoWrapper {}
 unsafe impl DataInit for MbMmapWrapper {}
 unsafe impl DataInit for MbEntryWrapper {}
+unsafe impl DataInit for MbTagHrtWrapper {}
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -143,6 +151,7 @@ fn mb_configure_system(
     let himem_start = GuestAddress(layout::HIMEM_START);
     
     let mut head_tag = mb_tag::default();
+    let mut hrt_tag = mb_tag_hrt::default();
     let mut meminfo = mb_tag_basic_meminfo::default();
     let mut memmap = mb_tag_mmap::default();
     let mut entries = std::cell::RefCell::new(Vec::new());
@@ -151,6 +160,7 @@ fn mb_configure_system(
     // the "totalsize" field as named in mb_info_header in palacios
     head_tag.type_ = (
         size_of::<mb_tag>() +
+        size_of::<mb_tag_hrt>() +
         size_of::<mb_tag_basic_meminfo>() +
         size_of::<mb_tag_mmap>() +
         size_of::<mb_mmap_entry>() * guest_mem.num_regions() +
@@ -158,6 +168,17 @@ fn mb_configure_system(
     
     // the "reserved" field as named in mb_info_header in palacios
     head_tag.size = 0;
+
+    hrt_tag.base.tag_type = MB_TAG_TYPE_HRT;
+    hrt_tag.base.size = size_of::<mb_tag_hrt>() as u32;
+    hrt_tag.total_num_apics = num_cpus as u32;
+    hrt_tag.first_hrt_apic_id = 0; // TODO: actual HRT setup
+    hrt_tag.have_hrt_ioapic = false as u32;
+    hrt_tag.cpu_freq_khz = 1024; // TODO: ???
+    hrt_tag.first_hrt_gpa = 0x0;
+    hrt_tag.gva_offset = 0xFFFF_8000_0000_0000;
+    // TODO: comm_page_gva
+    // TODO: hrt_int_vector
 
     meminfo.type_ = MB_TAG_TYPE_BASIC_MEMINFO;
     meminfo.size = size_of::<mb_tag_basic_meminfo>() as u32;
@@ -198,6 +219,11 @@ fn mb_configure_system(
         .write_obj_at_addr(MbTagWrapper(head_tag), mb_addr.unchecked_add(offset))
         .map_err(|_| Error::MultibootSetup)?;
     offset += size_of::<mb_tag>();
+
+    guest_mem
+        .write_obj_at_addr(MbTagHrtWrapper(hrt_tag), mb_addr.unchecked_add(offset))
+        .map_err(|_| Error::MultibootSetup)?;
+    offset += size_of::<mb_tag_hrt>();
 
     guest_mem
         .write_obj_at_addr(MbMeminfoWrapper(meminfo), mb_addr.unchecked_add(offset))
