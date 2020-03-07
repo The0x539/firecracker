@@ -32,7 +32,6 @@ use self::multiboot2::{
     TagHybridRuntime as mb_tag_hrt,
     TAG_TYPE_HRT as MB_TAG_TYPE_HRT,
 };
-use self::mb2;
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
