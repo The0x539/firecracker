@@ -17,7 +17,6 @@ use super::cmdline::Error as CmdlineError;
 use memory_model::{GuestAddress, GuestMemory};
 use sys_util;
 
-//use arch_gen::x86::multiboot2;
 use arch::x86_64::multiboot2 as mb2;
 use arch::x86_64::multiboot2_host::header as mb2_header;
 
@@ -96,7 +95,7 @@ fn load_mb2_kernel<F>(
 where
     F: Read + Seek,
 {
-    let mut opt_load_addrs: Option<mb2::HeaderAddress> = None;
+    let mut opt_load_addrs: Option<(u64, u64, u64, u64)> = None;
     let mut opt_entry_addr: Option<GuestAddress> = None;
 
     let mut opt_hrt_tag: Option<mb2::HeaderHybridRuntime> = None;
@@ -111,12 +110,7 @@ where
                 break;
             }
             mb2_header::Tag::LoadAddr(header_addr, load_addr, load_end_addr, bss_end_addr) => {
-                opt_load_addrs = Some(mb2::HeaderAddress {
-                    header_addr,
-                    load_addr,
-                    load_end_addr,
-                    bss_end_addr,
-                });
+                opt_load_addrs = Some((header_addr as u64, load_addr as u64, load_end_addr as u64, bss_end_addr as u64));
             }
             mb2_header::Tag::EntryAddr(addr) => {
                 opt_entry_addr = Some(GuestAddress(addr as usize));
@@ -140,26 +134,21 @@ where
         }
     }
 
-    let load_addrs = match opt_load_addrs {
-        None => return Err(Error::MissingHeaderTag),
-        Some(addrs) => addrs,
-    };
-    let entry_addr = match opt_entry_addr {
-        None => return Err(Error::MissingHeaderTag),
-        Some(addr) => addr,
-    };
+    let (header_addr, load_addr, load_end_addr, bss_end_addr) = opt_load_addrs.ok_or(Error::MissingHeaderTag)?;
+    let entry_addr = opt_entry_addr.ok_or(Error::MissingHeaderTag)?;
 
     //println!("load_addrs: {:#X?}", load_addrs);
     //println!("entry_addr: {:#X?}", entry_addr);
 
-    let src_addr = load_addrs.load_addr as usize - (load_addrs.header_addr as usize - mb2_location as usize);
-    let dest_addr = GuestAddress(load_addrs.load_addr as usize);
-    let read_len = (load_addrs.load_end_addr - load_addrs.load_addr) as usize;
+    //behold, the trifecta of 64-bit unsigned integers
+    let src_addr: u64 = load_addr - (header_addr - mb2_location);
+    let dest_addr: GuestAddress = GuestAddress(load_addr as usize);
+    let read_len: usize = (load_end_addr - load_addr) as usize;
 
     //println!("reading {:#X} bytes from file@{:#X} into mem@{:#X}", read_len, src_addr, dest_addr.0);
 
     kernel_image
-        .seek(SeekFrom::Start(src_addr as u64))
+        .seek(SeekFrom::Start(src_addr))
         .map_err(|_| Error::SeekKernelStart)?;
 
     guest_mem
@@ -168,16 +157,16 @@ where
 
     struct Zeroes ();
     impl Read for Zeroes {
-        fn read(&mut self, dest : &mut [u8]) -> std::result::Result<usize, std::io::Error> {
-            for i in 0..dest.len(){
+        fn read(&mut self, dest : &mut [u8]) -> std::io::Result<usize> {
+            for i in 0..dest.len() {
                 dest[i] = 0;
             }
             Ok(dest.len())
         }
     }
 
-    let bss_addr = GuestAddress(load_addrs.load_end_addr as usize);
-    let bss_len = (load_addrs.bss_end_addr - load_addrs.load_end_addr) as usize;
+    let bss_addr = GuestAddress(load_end_addr as usize);
+    let bss_len = (bss_end_addr - load_end_addr) as usize;
 
     //println!("zeroing {:#X} bytes from mem@{:#X} to mem@{:#X}", bss_len, load_addrs.load_end_addr, load_addrs.bss_end_addr);
 
