@@ -16,6 +16,8 @@ pub mod pml4;
 
 use std::mem::{self, size_of};
 
+pub extern crate multiboot2_host;
+
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
 use arch_gen::x86::multiboot2::{
     self as mb,

@@ -19,6 +19,7 @@ use sys_util;
 
 //use arch_gen::x86::multiboot2;
 use arch::x86_64::multiboot2 as mb2;
+use arch::x86_64::multiboot2_host::header as mb2_header;
 
 #[allow(non_camel_case_types)]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -69,34 +70,15 @@ impl fmt::Display for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn is_valid_mb_header(header: mb2::Header) -> bool {
-    if header.magic != mb2::HEADER_MAGIC {
-        return false;
-    }
-    // firecracker doesn't, at the time of writing, support MIPS
-    if header.architecture != mb2::Architecture::I386 {
-        return false;
-    }
-    let sum = header.checksum
-        .wrapping_add(header.magic)
-        .wrapping_add(header.architecture as u32)
-        .wrapping_add(header.header_length);
-    if sum != 0 {
-        return false;
-    }
-    return true;
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub fn load_kernel<F>(
     guest_mem: &GuestMemory,
-    kernel_image: &mut F,
+    mut kernel_image: &mut F,
     start_address: usize,
 ) -> Result<(GuestAddress, bool, Option<mb2::HeaderHybridRuntime>)>
 where
     F: Read + Seek,
 {
-    let mb_hdr_addr = find_mb2_header(kernel_image)
+    let mb_hdr_addr = mb2_header::find_header(&mut kernel_image)
         .map_err(|_| Error::ReadKernelImage)?;
     match mb_hdr_addr {
         None => load_elf_kernel(guest_mem, kernel_image, start_address).map(|x| (x, false, None)),
@@ -105,45 +87,11 @@ where
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn find_mb2_header<F>(kernel_image: &mut F) -> Result<Option<usize>>
-where F: Read + Seek {
-    // the first address after the ELF header
-    // that's 8-byte aligned
-    // consider just looking at the beginning
-    /*
-    let first_mb_addr = {
-        let mut addr = ehdr.e_ehsize;
-        addr += 7;
-        addr -= addr % 8;
-        addr as u32
-    };
-    */
-    let first_mb_addr = 0;
-
-    for i in (first_mb_addr..mb2::HEADER_SEARCH).step_by(mb2::HEADER_ALIGN as usize) {
-        kernel_image
-            .seek(SeekFrom::Start(i as u64))
-            .map_err(|_| Error::SeekProgramHeader)?;
-        let mut mb_hdr = mb2::Header::default();
-        unsafe {
-            // The multiboot header is a POD struct, so read_struct is safe.
-            sys_util::read_struct(kernel_image, &mut mb_hdr)
-                .map_err(|_| Error::ReadKernelDataStruct("Failed to read kernel img while searching for mb2 hdr"))?;
-        }
-        if is_valid_mb_header(mb_hdr) {
-            println!("found {:#?} @ {:#X}", mb_hdr, i);
-            return Ok(Some(i as usize))
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn load_mb2_kernel<F>(
     guest_mem: &GuestMemory,
-    kernel_image: &mut F,
-    start_address: usize,
-    mb2_location: usize,
+    mut kernel_image: &mut F,
+    _start_address: usize,
+    mb2_location: u64,
 ) -> Result<(GuestAddress, Option<mb2::HeaderHybridRuntime>)>
 where
     F: Read + Seek,
@@ -153,56 +101,45 @@ where
 
     let mut opt_hrt_tag: Option<mb2::HeaderHybridRuntime> = None;
 
-    let mut offset = mb2_location + mem::size_of::<mb2::Header>();
-    loop {
-        let mut tag = mb2::HeaderTag::default();
-        kernel_image
-            .seek(SeekFrom::Start(offset as u64))
-            .map_err(|_| Error::SeekProgramHeader)?;
-        unsafe {
-            sys_util::read_struct(kernel_image, &mut tag)
-                .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tag"))?;
-        }
-        //println!("{:#X?} @ {:#X}", tag, offset);
-        match tag.tag_type {
-            mb2::HeaderTagType::End => {
+    let iter = mb2_header::iter_tags(&mut kernel_image, mb2_location)
+        .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 header tags"))?;
+
+    for result in iter {
+        let tag = result.map_err(|_| Error::ReadKernelDataStruct("Failed to parse Multiboot2 header tag"))?;
+        match tag {
+            mb2_header::Tag::End => {
                 break;
             }
-            mb2::HeaderTagType::Address => {
-                let mut data = mb2::HeaderAddress::default();
-                unsafe {
-                    sys_util::read_struct(kernel_image, &mut data)
-                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
-                }
-                opt_load_addrs = Some(data);
-                //println!("{:#X?}", data);
+            mb2_header::Tag::LoadAddr(header_addr, load_addr, load_end_addr, bss_end_addr) => {
+                opt_load_addrs = Some(mb2::HeaderAddress {
+                    header_addr,
+                    load_addr,
+                    load_end_addr,
+                    bss_end_addr,
+                });
             }
-            mb2::HeaderTagType::EntryAddress |
-            mb2::HeaderTagType::EntryAddressEfi32 |
-            mb2::HeaderTagType::EntryAddressEfi64 => {
-                let mut data = mb2::HeaderEntryAddress::default();
-                unsafe {
-                    sys_util::read_struct(kernel_image, &mut data)
-                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
-                }
-                opt_entry_addr = Some(GuestAddress(data.entry_addr as usize));
-                //println!("{:#X?}", data);
+            mb2_header::Tag::EntryAddr(addr) => {
+                opt_entry_addr = Some(GuestAddress(addr as usize));
             }
-            mb2::HeaderTagType::HybridRuntime => {
-                let mut data = mb2::HeaderHybridRuntime::default();
-                unsafe {
-                    sys_util::read_struct(kernel_image, &mut data)
-                        .map_err(|_| Error::ReadKernelDataStruct("Failed to read tag body"))?;
-                }
-                opt_hrt_tag = Some(data);
-                //println!("{:#X?}", data);
+            mb2_header::Tag::HybridRuntime(flags, gpa_map_req, hrt_hihalf_offset, nautilus_entry_gva, comm_page_gpa, int_vec) => {
+                opt_hrt_tag = Some(mb2::HeaderHybridRuntime {
+                    flags: mb2::HybridRuntimeFlags(flags),
+                    gpa_map_req,
+                    hrt_hihalf_offset,
+                    nautilus_entry_gva,
+                    comm_page_gpa,
+                    int_vec,
+                });
+            }
+            mb2_header::Tag::Unknown(_,_,_) => {
+                return Err(Error::ReadKernelDataStruct("Unknown Multiboot2 header tag"));
             }
             _ => {
-                println!("unhandled tag type: {:?}", tag.tag_type);
+                return Err(Error::ReadKernelDataStruct("Unsupported Multiboot2 header tag"));
             }
         }
-        offset += tag.size as usize;
     }
+
     let load_addrs = match opt_load_addrs {
         None => return Err(Error::MissingHeaderTag),
         Some(addrs) => addrs,
@@ -215,7 +152,7 @@ where
     //println!("load_addrs: {:#X?}", load_addrs);
     //println!("entry_addr: {:#X?}", entry_addr);
 
-    let src_addr = load_addrs.load_addr as usize - (load_addrs.header_addr as usize - mb2_location);
+    let src_addr = load_addrs.load_addr as usize - (load_addrs.header_addr as usize - mb2_location as usize);
     let dest_addr = GuestAddress(load_addrs.load_addr as usize);
     let read_len = (load_addrs.load_end_addr - load_addrs.load_addr) as usize;
 
