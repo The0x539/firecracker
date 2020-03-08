@@ -52,12 +52,14 @@ pub enum Error {
     WriteGDT,
     /// Writing the IDT to RAM failed.
     WriteIDT,
+    /// Writing PML4 to RAM failed.
+    WritePML4Address,
     /// Writing PDPTE to RAM failed.
     WritePDPTEAddress,
     /// Writing PDE to RAM failed.
     WritePDEAddress,
-    /// Writing PML4 to RAM failed.
-    WritePML4Address,
+    /// Writing PTE to RAM failed.
+    WritePTEAddress,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -674,8 +676,10 @@ fn hrt_setup_page_tables(
         };
         pml4e.set_pdp_base_addr(pdp_base_addr.0 as u64 >> 12);
         let entry_loc = l1_start.unchecked_add(i * 8);
-        mem.write_obj_at_addr(pml4e.0, entry_loc);
-        mem.write_obj_at_addr(pml4e.0, GuestAddress(entry_loc.0 - 0x800));
+        mem.write_obj_at_addr(pml4e.0, entry_loc)
+            .map_err(|_| Error::WritePML4Address)?;
+        mem.write_obj_at_addr(pml4e.0, GuestAddress(entry_loc.0 - 0x800))
+            .map_err(|_| Error::WritePML4Address)?;
         println!("PML4[{}] @ {:#X} = {:#X} ({:#X} -> {:#X})", i, entry_loc.0, pml4e.pdp_base_addr(), cur_gva, cur_gpa.0);
     }
 
@@ -701,10 +705,12 @@ fn hrt_setup_page_tables(
             pdpe.set_pd_base_addr(pd_base_addr.0 as u64 >> 12);
             let entry_loc = l2_start.unchecked_add((512*i + j) * 8);
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc);
+                mem.write_obj_at_addr(0x0 as u64, entry_loc)
+                    .map_err(|_| Error::WritePDPTEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pdpe.0, entry_loc);
+            mem.write_obj_at_addr(pdpe.0, entry_loc)
+                .map_err(|_| Error::WritePDPTEAddress)?;
             println!("PDP[{}][{}] @ {:#X} = {:#X} ({:#X} -> {:#X}, huge={})", i, j, entry_loc.0, pdpe.pd_base_addr(), cur_gva, cur_gpa.0, pdpe.is_1gb());
         }
     }
@@ -731,10 +737,12 @@ fn hrt_setup_page_tables(
             pde.set_pt_base_addr(pt_base_addr.0 as u64 >> 12);
             let entry_loc = l3_start.unchecked_add((512*i + j) * 8);
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc);
+                mem.write_obj_at_addr(0x0 as u64, entry_loc)
+                    .map_err(|_| Error::WritePDEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pde.0, entry_loc);
+            mem.write_obj_at_addr(pde.0, entry_loc)
+                .map_err(|_| Error::WritePDEAddress)?;
             println!("PD[{}][{}] @ {:#X} = {:#X} ({:#X} -> {:#X}, large={})", i, j, entry_loc.0, pde.pt_base_addr(), cur_gva, cur_gpa.0, pde.is_2mb());
         }
     }
@@ -756,10 +764,12 @@ fn hrt_setup_page_tables(
             pte.set_page_base_addr(page_align(cur_gpa).0 as u64 >> 12);
             let entry_loc = l4_start.unchecked_add((512*i + j) * 8);
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc);
+                mem.write_obj_at_addr(0x0 as u64, entry_loc)
+                    .map_err(|_| Error::WritePTEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pte.0, entry_loc);
+            mem.write_obj_at_addr(pte.0, entry_loc)
+                .map_err(|_| Error::WritePTEAddress)?;
             println!("PT[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pte.page_base_addr(), cur_gva, cur_gpa.0);
         }
     }
