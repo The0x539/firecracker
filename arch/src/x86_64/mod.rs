@@ -19,7 +19,6 @@ use std::mem;
 pub extern crate multiboot2_host;
 
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
-use arch_gen::x86::multiboot2 as mb;
 use self::multiboot2_host::bootinfo as mb2_bootinfo;
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
@@ -121,8 +120,7 @@ fn mb_configure_system(
         regions.borrow_mut().push(mb2_bootinfo::MemMapEntry {
             base_addr: base.0 as u64,
             length: size as u64,
-            // this seems like info that ought to exist but doesn't
-            entry_type: mb::MULTIBOOT_MEMORY_AVAILABLE,
+            entry_type: 1, // available
         });
         Ok(())
     }).map_err(|_| Error::MultibootSetup)?;
