@@ -34,6 +34,7 @@ use self::multiboot2::{
     TagHybridRuntime as mb_tag_hrt,
     TAG_TYPE_HRT as MB_TAG_TYPE_HRT,
 };
+use self::multiboot2_host::bootinfo as mb2_bootinfo;
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
@@ -146,105 +147,69 @@ fn mb_configure_system(
     cmdline_size: usize,
     num_cpus: u8,
 ) -> super::Result<()> {
-    let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let end_32bit_gap_start = GuestAddress(get_32bit_gap_start());
-
-    let himem_start = GuestAddress(layout::HIMEM_START);
-    
-    let mut head_tag = mb_tag::default();
-    let mut hrt_tag = mb_tag_hrt::default();
-    let mut meminfo = mb_tag_basic_meminfo::default();
-    let mut memmap = mb_tag_mmap::default();
-    let mut entries = std::cell::RefCell::new(Vec::new());
-    let mut end_tag = mb_tag::default();
-    
-    // the "totalsize" field as named in mb_info_header in palacios
-    head_tag.type_ = (
-        size_of::<mb_tag>() +
-        size_of::<mb_tag_hrt>() +
-        size_of::<mb_tag_basic_meminfo>() +
-        size_of::<mb_tag_mmap>() +
-        size_of::<mb_mmap_entry>() * guest_mem.num_regions() +
-        size_of::<mb_tag>()) as u32;
-    
-    // the "reserved" field as named in mb_info_header in palacios
-    head_tag.size = 0;
-
-    hrt_tag.base.tag_type = MB_TAG_TYPE_HRT;
-    hrt_tag.base.size = size_of::<mb_tag_hrt>() as u32;
-    hrt_tag.total_num_apics = num_cpus as u32;
-    hrt_tag.first_hrt_apic_id = 0; // TODO: actual HRT setup
-    hrt_tag.have_hrt_ioapic = false as u32;
-    hrt_tag.cpu_freq_khz = 1024; // TODO: ???
-    hrt_tag.first_hrt_gpa = 0x0;
-    hrt_tag.gva_offset = 0xFFFF_8000_0000_0000;
-    // TODO: comm_page_gva
-    // TODO: hrt_int_vector
-
-    meminfo.type_ = MB_TAG_TYPE_BASIC_MEMINFO;
-    meminfo.size = size_of::<mb_tag_basic_meminfo>() as u32;
-    //meminfo.mem_lower = 0;
-    meminfo.mem_lower = 640; // thank you, bill gates
-    // possibly wrong
-    meminfo.mem_upper = ((guest_mem.end_addr().0 - 1024*1024) / 1024) as u32;
-
-    memmap.type_ = MB_TAG_TYPE_MMAP;
-    memmap.size = size_of::<mb_tag_basic_meminfo>() as u32;
-    memmap.size += (size_of::<mb_mmap_entry>() * guest_mem.num_regions()) as u32;
-    memmap.entry_size = size_of::<mb_mmap_entry>() as u32;
-    memmap.entry_version = 0;
-
+    /*
+    let mut regions = std::cell::RefCell::new(Vec::new());
     guest_mem.with_regions::<_, ()>(|_index, base, size, _ptr| {
-        entries.borrow_mut().push(mb_mmap_entry {
-            addr: base.0 as u64,
-            len: size as u64,
+        regions.borrow_mut().push(mb2_bootinfo::MemMapEntry {
+            base_addr: base.0 as u64,
+            length: size as u64,
             // this seems like info that ought to exist but doesn't
-            type_: mb::MULTIBOOT_MEMORY_AVAILABLE,
-            zero: 0,
+            entry_type: mb::MULTIBOOT_MEMORY_AVAILABLE,
         });
         Ok(())
     });
-
-    end_tag.type_ = 0;
-    end_tag.size = 8;
-
+    */
+    let mut regions = std::cell::RefCell::new(Vec::new());
+    guest_mem.with_regions::<_, ()>(|_index, base, size, _ptr| {
+        regions.borrow_mut().push(mb2_bootinfo::MemMapEntry {
+            base_addr: base.0 as u64,
+            length: size as u64,
+            // this seems like info that ought to exist but doesn't
+            entry_type: mb::MULTIBOOT_MEMORY_AVAILABLE,
+        });
+        Ok(())
+    });
+    
+    let tags = [
+        mb2_bootinfo::Tag::HybridRuntime {
+            total_num_apics: num_cpus as u32,
+            first_hrt_apic_id: 0, // TODO: actual HRT setup
+            have_hrt_ioapic: false,
+            first_hrt_ioapic_entry: 0x0, // ???
+            cpu_freq_khz: 1024, // TODO: ???
+            hrt_flags: 0x0, // TODO: get that variable over here
+            max_mem_mapped: 1024 * 1024 * 1024, // TODO: ???
+            first_hrt_gpa: 0x0,
+            boot_state_gpa: 0x0, // TODO: ???
+            gva_offset: 0xFFFF_8000_0000_0000,
+            comm_page_gpa: 0x0, // TODO: ???
+            hrt_int_vector: 0x0, // TODO: ???
+        },
+        mb2_bootinfo::Tag::BasicMeminfo {
+            mem_lower: 640, // thank you, bill gates
+            mem_upper: ((guest_mem.end_addr().0 - 1024*1024) / 1024) as u32, // possibly wrong
+        },
+        mb2_bootinfo::Tag::MemMap {
+            entries: regions.into_inner(),
+        },
+        mb2_bootinfo::Tag::End
+    ];
+    
     // Assume for the time being that we have space below the kernel
     let mb_addr = GuestAddress(layout::ZERO_PAGE_START);
+    let mb_size = mb2_bootinfo::bootinfo_size(&tags) as usize;
     guest_mem
-        .checked_offset(mb_addr, head_tag.type_ as usize)
+        .checked_offset(mb_addr, mb_size)
         .ok_or(Error::MultibootTooBig)?;
 
-    let mut offset = 0;
-
-    guest_mem
-        .write_obj_at_addr(MbTagWrapper(head_tag), mb_addr.unchecked_add(offset))
+    // TODO: write directly to guest memory instead of using this intermediate buffer
+    // Still better than the one-at-a-time thing that preceded this
+    let mut buf = vec![0 as u8; mb_size];
+    mb2_bootinfo::write_bootinfo(&tags, std::io::Cursor::new(&mut buf), 0)
         .map_err(|_| Error::MultibootSetup)?;
-    offset += size_of::<mb_tag>();
 
     guest_mem
-        .write_obj_at_addr(MbTagHrtWrapper(hrt_tag), mb_addr.unchecked_add(offset))
-        .map_err(|_| Error::MultibootSetup)?;
-    offset += size_of::<mb_tag_hrt>();
-
-    guest_mem
-        .write_obj_at_addr(MbMeminfoWrapper(meminfo), mb_addr.unchecked_add(offset))
-        .map_err(|_| Error::MultibootSetup)?;
-    offset += size_of::<mb_tag_basic_meminfo>();
-
-    guest_mem
-        .write_obj_at_addr(MbMmapWrapper(memmap), mb_addr.unchecked_add(offset))
-        .map_err(|_| Error::MultibootSetup)?;
-    offset += size_of::<mb_tag_mmap>();
-
-    for entry in entries.into_inner() {
-        guest_mem
-            .write_obj_at_addr(MbEntryWrapper(entry), mb_addr.unchecked_add(offset))
-            .map_err(|_| Error::MultibootSetup)?;
-        offset += size_of::<mb_mmap_entry>();
-    }
-
-    guest_mem
-        .write_obj_at_addr(MbTagWrapper(end_tag), mb_addr.unchecked_add(offset))
+        .write_slice_at_addr(&buf, mb_addr)
         .map_err(|_| Error::MultibootSetup)?;
 
     Ok(())
