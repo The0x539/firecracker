@@ -414,12 +414,12 @@ fn hrt_get_pt_loc(
 }
 
 fn hrt_setup_page_tables(
-    mem: &GuestMemory,
+    guest_mem: &GuestMemory,
     sregs: &mut kvm_sregs,
     hrt_header: mb2::HeaderHybridRuntime,
 ) -> Result<()> {
     let min_gpa: usize = 0;
-    let max_gpa: usize = mem.end_addr().0;
+    let max_gpa: usize = guest_mem.end_addr().0;
     let min_gva: usize = hrt_header.hrt_hihalf_offset as usize;
     let max_gva: usize = min_gva + max_gpa;
 
@@ -441,19 +441,14 @@ fn hrt_setup_page_tables(
 
     println!("paging level = {:#?}", paging_level);
     
-    let (num_l1, num_l2, num_l3, num_l4) = hrt_compute_pts(mem);
+    let (num_l1, num_l2, num_l3, num_l4) = hrt_compute_pts(guest_mem);
     println!("{} PML4, {} PDP, {} PD, {} PT", num_l1, num_l2, num_l3, num_l4);
-    let l1_start = hrt_get_pt_loc(mem, paging_level);
+    let l1_start = hrt_get_pt_loc(guest_mem, paging_level);
     let l2_start = l1_start + 4096*num_l1;
     let l3_start = l2_start + 4096*num_l2;
     let l4_start = l3_start + 4096*num_l3;
 
     println!("PML4 @ {:#X}, PDP @ {:#X}, PD @ {:#X}, PT @ {:#X}", l1_start, l2_start, l3_start, l4_start);
-
-    for i in 0..512 {
-        mem.write_obj_at_addr(0x0 as u64, GuestAddress(l1_start + i*8))
-            .map_err(|_| Error::WritePML4Address)?;
-    }
 
     let pml4_range = {
         if min_gva == 0x0 {
@@ -467,47 +462,27 @@ fn hrt_setup_page_tables(
     };
     
     let start = pml4_range.start;
-    /*
-    let pml4 = [pml4::PML4e(0); 512];
+    let mut pml4 = [pml4::PML4e(0); 512];
 
     for i in pml4_range {
         let j = i - start;
-        let j = i - start;
-        let cur_gva = min_gva + j*L1_UNIT;
         let cur_gpa = min_gpa + j*L1_UNIT;
 
         pml4[i].set_present(true);
         pml4[i].set_writable(true);
-        let pdp_base_addr = match paging_level {
-            PagingLevel::Colossal => page_align(cur_gpa),
-            _ => page_align(l2_start + ((i - start) * PAGE_SIZE))
-        };
-        pml4[i].set_pdp_base_addr(pdp_base_addr.0 as u64 >> 12);
-    }
-    */
-    
-    
-    for i in pml4_range {
-        let j = i - start;
-        let cur_gva = min_gva + j*L1_UNIT;
-        let cur_gpa = min_gpa + j*L1_UNIT;
 
-        let mut pml4e = pml4::PML4e(0x0);
-        pml4e.set_present(true);
-        pml4e.set_writable(true);
-        let pdp_base_addr = match paging_level {
-            PagingLevel::Colossal => page_align(cur_gpa),
-            _ => page_align(l2_start + ((i - start) * PAGE_SIZE))
-        };
-        pml4e.set_pdp_base_addr(pdp_base_addr as u64 >> 12);
-        let entry_loc = GuestAddress(l1_start + i*8);
-        mem.write_obj_at_addr(pml4e.0, entry_loc)
-            .map_err(|_| Error::WritePML4Address)?;
-        mem.write_obj_at_addr(pml4e.0, GuestAddress(entry_loc.0 - 0x800))
-            .map_err(|_| Error::WritePML4Address)?;
-        println!("PML4[{}] @ {:#X} = {:#X} ({:#X} -> {:#X})", i, entry_loc.0, pml4e.pdp_base_addr(), cur_gva, cur_gpa);
+        pml4[i].set_pdp_base_addr(match paging_level {
+            PagingLevel::Colossal => cur_gpa,
+            _ => l2_start + j*PAGE_SIZE,
+        } as u64 >> 12);
+
+        pml4[i - start] = pml4[i];
     }
-    
+
+    let buf: [u8; 4096] = unsafe { mem::transmute(pml4) };
+    guest_mem
+        .write_slice_at_addr(&buf, GuestAddress(l1_start))
+        .map_err(|_| Error::WritePML4Address)?;
 
     if paging_level == PagingLevel::Colossal {
         sregs.cr3 = l1_start as u64;
@@ -515,31 +490,35 @@ fn hrt_setup_page_tables(
     }
 
     for i in 0..num_l2 {
-        let pdp_gva = min_gva + i*L1_UNIT;
+        let mut pdp = [pml4::PDPe(0); 512];
+
         let pdp_gpa = min_gpa + i*L1_UNIT;
+        let pdp_gva = min_gva + i*L1_UNIT;
 
         for j in 0..512 {
-            let cur_gva = pdp_gva + j*L2_UNIT;
             let cur_gpa = pdp_gpa + j*L2_UNIT;
-            let mut pdpe = pml4::PDPe(0x0);
-            pdpe.set_present(true);
-            pdpe.set_writable(true);
-            let pd_base_addr = match paging_level {
-                PagingLevel::Huge => page_align(cur_gpa),
-                _ => page_align(l3_start + ((512*i + j) * PAGE_SIZE))
-            };
-            pdpe.set_1gb(paging_level == PagingLevel::Huge);
-            pdpe.set_pd_base_addr(pd_base_addr as u64 >> 12);
-            let entry_loc = GuestAddress(l2_start + ((512*i + j) * 8));
+            let cur_gva = pdp_gva + j*L2_UNIT;
+
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc)
-                    .map_err(|_| Error::WritePDPTEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pdpe.0, entry_loc)
-                .map_err(|_| Error::WritePDPTEAddress)?;
-            println!("PDP[{}][{}] @ {:#X} = {:#X} ({:#X} -> {:#X}, huge={})", i, j, entry_loc.0, pdpe.pd_base_addr(), cur_gva, cur_gpa, pdpe.is_1gb());
+
+            pdp[j].set_present(true);
+            pdp[j].set_writable(true);
+
+            pdp[j].set_1gb(paging_level == PagingLevel::Huge);
+
+            pdp[j].set_pd_base_addr(match paging_level {
+                PagingLevel::Huge => cur_gpa,
+                _ => l3_start + ((512*i + j) * PAGE_SIZE)
+            } as u64 >> 12);
         }
+
+        let buf: [u8; 4096] = unsafe { mem::transmute(pdp) };
+        guest_mem
+            .write_slice_at_addr(&buf, GuestAddress(l2_start + i*PAGE_SIZE))
+            .map_err(|_| Error::WritePDPTEAddress)?;
+                                
     }
 
     if paging_level == PagingLevel::Huge {
@@ -548,31 +527,34 @@ fn hrt_setup_page_tables(
     }
 
     for i in 0..num_l3 {
+        let mut pd = [pml4::PDe(0); 512];
+
         let pd_gva = min_gva + i*L2_UNIT;
         let pd_gpa = min_gpa + i*L2_UNIT;
 
         for j in 0..512 {
             let cur_gva = pd_gva + j*L3_UNIT;
             let cur_gpa = pd_gpa + j*L3_UNIT;
-            let mut pde = pml4::PDe(0x0);
-            pde.set_present(true);
-            pde.set_writable(true);
-            let pt_base_addr = match paging_level {
-                PagingLevel::Large => page_align(cur_gpa),
-                _ => page_align(l4_start + ((512*i + j) * PAGE_SIZE))
-            };
-            pde.set_2mb(paging_level == PagingLevel::Large);
-            pde.set_pt_base_addr(pt_base_addr as u64 >> 12);
-            let entry_loc = GuestAddress(l3_start + ((512*i + j) * 8));
+
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc)
-                    .map_err(|_| Error::WritePDEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pde.0, entry_loc)
-                .map_err(|_| Error::WritePDEAddress)?;
-            println!("PD[{}][{}] @ {:#X} = {:#X} ({:#X} -> {:#X}, large={})", i, j, entry_loc.0, pde.pt_base_addr(), cur_gva, cur_gpa, pde.is_2mb());
+
+            pd[j].set_present(true);
+            pd[j].set_writable(true);
+
+            pd[j].set_2mb(paging_level == PagingLevel::Large);
+
+            pd[j].set_pt_base_addr(match paging_level {
+                PagingLevel::Large => cur_gpa,
+                _ => l4_start + ((512*i + j) * PAGE_SIZE)
+            } as u64 >> 12);
         }
+
+        let buf: [u8; 4096] = unsafe { mem::transmute(pd) };
+        guest_mem
+            .write_slice_at_addr(&buf, GuestAddress(l3_start + i*PAGE_SIZE))
+            .map_err(|_| Error::WritePDEAddress)?;
     }
 
     if paging_level == PagingLevel::Large {
@@ -580,31 +562,34 @@ fn hrt_setup_page_tables(
         return Ok(());
     }
 
-    'outer: for i in 0..num_l4 {
+    for i in 0..num_l4 {
+        let mut pt = [pml4::PTe(0); 512];
+
         let pt_gva = min_gva + i*L3_UNIT;
         let pt_gpa = min_gpa + i*L3_UNIT;
 
         for j in 0..512 {
             let cur_gva = pt_gva + j*L3_UNIT;
             let cur_gpa = pt_gpa + j*L4_UNIT;
-            let mut pte = pml4::PTe(0x0);
-            pte.set_present(true);
-            pte.set_writable(true);
-            pte.set_page_base_addr(page_align(cur_gpa) as u64 >> 12);
-            let entry_loc = GuestAddress(l4_start + ((512*i + j) * 8));
+
             if cur_gva > max_gva {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc)
-                    .map_err(|_| Error::WritePTEAddress)?;
                 continue;
             }
-            mem.write_obj_at_addr(pte.0, entry_loc)
-                .map_err(|_| Error::WritePTEAddress)?;
-            println!("PT[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pte.page_base_addr(), cur_gva, cur_gpa);
+
+            pt[j].set_present(true);
+            pt[j].set_writable(true);
+
+            pt[j].set_page_base_addr(cur_gpa as u64 >> 12);
         }
+
+        let buf: [u8; 4096] = unsafe { mem::transmute(pt) };
+        guest_mem
+            .write_slice_at_addr(&buf, GuestAddress(l4_start + i*PAGE_SIZE))
+            .map_err(|_| Error::WritePTEAddress)?;
     }
     
     sregs.cr3 = l1_start as u64;
-    return Ok(());
+    Ok(())
 }
 
 fn setup_page_tables(mem: &GuestMemory, sregs: &mut kvm_sregs) -> Result<()> {

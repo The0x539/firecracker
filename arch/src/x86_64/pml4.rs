@@ -18,6 +18,7 @@ bitfield! {
 }
 
 bitfield! {
+    #[derive(Copy, Clone)]
     pub struct PDPe(u64);
     pub present, set_present: 0;
     pub writable, set_writable: 1;
@@ -41,6 +42,7 @@ bitfield! {
 }
 
 bitfield! {
+    #[derive(Copy, Clone)]
     pub struct PDe(u64);
     pub present, set_present: 0;
     pub writable, set_writable: 1;
@@ -64,6 +66,7 @@ bitfield! {
 }
 
 bitfield! {
+    #[derive(Copy, Clone)]
     pub struct PTe(u64);
     pub present, set_present: 0;
     pub writable, set_writable: 1;
