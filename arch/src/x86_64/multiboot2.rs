@@ -220,7 +220,8 @@ impl Default for TagBasicMemInfo {
                 tag_type: TagType::BasicMemInfo as u32,
                 size: 16,
             },
-            ..Default::default()
+            mem_lower: 0,
+            mem_upper: 0,
         }
     }
 }
@@ -241,7 +242,9 @@ impl Default for TagBootDev {
                 tag_type: TagType::BootDev as u32,
                 size: 20,
             },
-            ..Default::default()
+            bios_dev: 0,
+            partition: 0,
+            sub_partition: 0,
         }
     }
 }

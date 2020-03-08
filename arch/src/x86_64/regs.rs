@@ -7,7 +7,7 @@
 
 use std::{io, mem, result};
 
-use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_msrs, kvm_regs, kvm_sregs, kvm_segment};
+use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_msrs, kvm_regs, kvm_sregs};
 use kvm_ioctls::VcpuFd;
 
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
@@ -237,6 +237,7 @@ fn write_idt_value(val: u64, guest_mem: &GuestMemory) -> Result<()> {
         .map_err(|_| Error::WriteIDT)
 }
 
+#[allow(dead_code)] // Not sure how best to do this right now
 fn write_idt_value_at_addr(val: u64, guest_mem: &GuestMemory, boot_idt_addr: GuestAddress) -> Result<()> {
     guest_mem
         .write_obj_at_addr(val, boot_idt_addr)
@@ -452,7 +453,8 @@ fn hrt_setup_page_tables(
     println!("PML4 @ {:#X}, PDP @ {:#X}, PD @ {:#X}, PT @ {:#X}", l1_start.0, l2_start.0, l3_start.0, l4_start.0);
 
     for i in 0..512 {
-        mem.write_obj_at_addr(0x0 as u64, l1_start.unchecked_add(i * 8));
+        mem.write_obj_at_addr(0x0 as u64, l1_start.unchecked_add(i * 8))
+            .map_err(|_| Error::WritePML4Address)?;
     }
 
     let pml4_range = {

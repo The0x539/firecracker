@@ -14,26 +14,12 @@ pub mod regs;
 pub mod multiboot2;
 pub mod pml4;
 
-use std::mem::{self, size_of};
+use std::mem;
 
 pub extern crate multiboot2_host;
 
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
-use arch_gen::x86::multiboot2::{
-    self as mb,
-
-    multiboot_tag as mb_tag,
-    multiboot_tag_basic_meminfo as mb_tag_basic_meminfo,
-    multiboot_tag_mmap as mb_tag_mmap,
-    multiboot_mmap_entry as mb_mmap_entry,
-
-    MULTIBOOT_TAG_TYPE_BASIC_MEMINFO as MB_TAG_TYPE_BASIC_MEMINFO,
-    MULTIBOOT_TAG_TYPE_MMAP as MB_TAG_TYPE_MMAP,
-};
-use self::multiboot2::{
-    TagHybridRuntime as mb_tag_hrt,
-    TAG_TYPE_HRT as MB_TAG_TYPE_HRT,
-};
+use arch_gen::x86::multiboot2 as mb;
 use self::multiboot2_host::bootinfo as mb2_bootinfo;
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
@@ -44,24 +30,9 @@ use memory_model::{DataInit, GuestAddress, GuestMemory};
 // is prohibited.
 #[derive(Copy, Clone)]
 struct BootParamsWrapper(boot_params);
-#[derive(Copy, Clone)]
-struct MbTagWrapper(mb_tag);
-#[derive(Copy, Clone)]
-struct MbMeminfoWrapper(mb_tag_basic_meminfo);
-#[derive(Copy, Clone)]
-struct MbMmapWrapper(mb_tag_mmap);
-#[derive(Copy, Clone)]
-struct MbEntryWrapper(mb_mmap_entry);
-#[derive(Copy, Clone)]
-struct MbTagHrtWrapper(mb_tag_hrt);
 
 // It is safe to initialize BootParamsWrap which is a wrapper over `boot_params` (a series of ints).
 unsafe impl DataInit for BootParamsWrapper {}
-unsafe impl DataInit for MbTagWrapper {}
-unsafe impl DataInit for MbMeminfoWrapper {}
-unsafe impl DataInit for MbMmapWrapper {}
-unsafe impl DataInit for MbEntryWrapper {}
-unsafe impl DataInit for MbTagHrtWrapper {}
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -135,7 +106,7 @@ pub fn configure_system(
     is_multiboot: bool,
 ) -> super::Result<()> {
     if is_multiboot {
-        return mb_configure_system(guest_mem, cmdline_addr, cmdline_size, num_cpus);
+        return mb_configure_system(guest_mem, num_cpus);
     } else {
         return bp_configure_system(guest_mem, cmdline_addr, cmdline_size, num_cpus);
     }
@@ -143,12 +114,9 @@ pub fn configure_system(
 
 fn mb_configure_system(
     guest_mem: &GuestMemory,
-    cmdline_addr: GuestAddress,
-    cmdline_size: usize,
     num_cpus: u8,
 ) -> super::Result<()> {
-    /*
-    let mut regions = std::cell::RefCell::new(Vec::new());
+    let regions = std::cell::RefCell::new(Vec::new());
     guest_mem.with_regions::<_, ()>(|_index, base, size, _ptr| {
         regions.borrow_mut().push(mb2_bootinfo::MemMapEntry {
             base_addr: base.0 as u64,
@@ -157,18 +125,7 @@ fn mb_configure_system(
             entry_type: mb::MULTIBOOT_MEMORY_AVAILABLE,
         });
         Ok(())
-    });
-    */
-    let mut regions = std::cell::RefCell::new(Vec::new());
-    guest_mem.with_regions::<_, ()>(|_index, base, size, _ptr| {
-        regions.borrow_mut().push(mb2_bootinfo::MemMapEntry {
-            base_addr: base.0 as u64,
-            length: size as u64,
-            // this seems like info that ought to exist but doesn't
-            entry_type: mb::MULTIBOOT_MEMORY_AVAILABLE,
-        });
-        Ok(())
-    });
+    }).map_err(|_| Error::MultibootSetup)?;
     
     let tags = [
         mb2_bootinfo::Tag::HybridRuntime {
