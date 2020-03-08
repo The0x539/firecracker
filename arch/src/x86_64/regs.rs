@@ -27,13 +27,6 @@ const L3_UNIT: usize = L4_UNIT * 512;
 const L2_UNIT: usize = L3_UNIT * 512;
 const L1_UNIT: usize = L2_UNIT * 512;
 
-const LEGACY_PT_UNIT: usize = L4_UNIT;
-const LEGACY_PD_UNIT: usize = LEGACY_PT_UNIT * 1024;
-
-const PAE_PT_UNIT: usize = L4_UNIT;
-const PAE_PD_UNIT: usize = PAE_PT_UNIT * 512;
-const PAE_PDP_UNIT: usize = PAE_PD_UNIT * 512;
-
 const HRT_GVA_OFFSET: usize = 0xFFFF_8000_0000_0000;
 
 #[derive(Debug)]
@@ -388,23 +381,6 @@ fn ceil_div(a: usize, b: usize) -> usize {
     };
 }
 
-fn hrt_compute_legacy_pts(mem: &GuestMemory) -> (usize, usize) {
-    let max_gva = mem.end_addr().0;
-    return (
-        1,
-        ceil_div(ceil_div(max_gva, 4096), 1024)
-    );
-}
-
-fn hrt_compute_pae_pts(mem: &GuestMemory) -> (usize, usize, usize) {
-    let max_gva = mem.end_addr().0;
-    return (
-        1,
-        ceil_div(ceil_div(max_gva, 512*4096), 512),
-        ceil_div(ceil_div(max_gva, 4096), 512)
-    )
-}
-
 fn hrt_compute_pts(mem: &GuestMemory) -> (usize, usize, usize, usize) {
     let max_gva = mem.end_addr().0;
     // TODO: use ceil division
@@ -418,28 +394,6 @@ fn hrt_compute_pts(mem: &GuestMemory) -> (usize, usize, usize, usize) {
 
 fn page_align(addr: GuestAddress) -> GuestAddress {
     return GuestAddress((addr.0 >> 12) << 12);
-}
-
-fn hrt_get_legacy_pt_loc(
-    mem: &GuestMemory,
-) -> GuestAddress {
-    let (pde, pte) = hrt_compute_legacy_pts(mem);
-    let num_pt = pde + pte;
-    let end_addr = mem.end_addr();
-    let end_page = page_align(end_addr);
-    let enough_room = end_page.0 - (4+num_pt)*4096;
-    return page_align(GuestAddress(enough_room));
-}
-
-fn hrt_get_pae_pt_loc(
-    mem: &GuestMemory,
-) -> GuestAddress {
-    let (pdpe, pde, pte) = hrt_compute_pae_pts(mem);
-    let num_pt = pdpe + pde + pte;
-    let end_addr = mem.end_addr();
-    let end_page = page_align(end_addr);
-    let enough_room = end_page.0 - (4+num_pt)*4096;
-    return page_align(GuestAddress(enough_room));
 }
 
 fn hrt_get_pt_loc(
@@ -457,154 +411,6 @@ fn hrt_get_pt_loc(
     let end_page = page_align(end_addr);
     let enough_room = end_page.0 - (4+num_pt)*4096;
     return page_align(GuestAddress(enough_room));
-}
-
-fn hrt_setup_legacy_page_tables(
-    mem: &GuestMemory,
-    sregs: &mut kvm_sregs,
-    hrt_header: mb2::HeaderHybridRuntime,
-) -> Result<GuestAddress> {
-    let min_addr = 0;
-    let max_addr = mem.end_addr().0;
-    
-    println!("guest phys mem: {:#X} - {:#X}\nguest virt mem: {:#X} - {:#X}", min_addr, max_addr, min_addr, max_addr);
-
-    let (num_pd, num_pt) = hrt_compute_legacy_pts(mem);
-    println!("{} PDT, {} PT", num_pd, num_pt);
-
-    let pd_start = hrt_get_legacy_pt_loc(mem);
-    let pt_start = pd_start.unchecked_add(4096 * num_pd);
-
-    println!("PD @ {:#X}, PT @ {:#X}", pd_start.0, pt_start.0);
-    
-    for i in 0..1024 {
-        let cur_addr = min_addr + i*LEGACY_PD_UNIT;
-
-        let mut pde = pml4::LegacyPDe(0x0);
-        pde.set_present(true);
-        pde.set_writable(true);
-        let pt_base_addr = page_align(pt_start.unchecked_add(i * PAGE_SIZE));
-        
-        pde.set_4mb(false);
-    
-        pde.set_pt_base_addr(pt_base_addr.0 as u32 >> 12);
-        let entry_loc = pd_start.unchecked_add(4 * i);
-
-        mem.write_obj_at_addr(pde.0, entry_loc);
-        println!("PD[{}] @ {:#X} -> {:#X} ({:#X} -> {:#X}, large={})", i, entry_loc.0, pde.pt_base_addr(), cur_addr, cur_addr, pde.is_4mb());
-    }
-
-    'outer: for i in 0..num_pt {
-        let pt_addr = min_addr + i*LEGACY_PD_UNIT;
-        
-        for j in 0..1024 {
-            let cur_addr = pt_addr + j*LEGACY_PT_UNIT;
-            
-            if cur_addr >= max_addr {
-                break 'outer;
-            }
-
-            let mut pte = pml4::LegacyPTe(0x0);
-            pte.set_present(true);
-            pte.set_writable(true);
-            pte.set_page_base_addr(cur_addr as u32);
-            let entry_loc = pt_start.unchecked_add(4096*i + 4*j); // might be 512 rather than 4096
-            mem.write_obj_at_addr(pte.0, entry_loc);
-            println!("PT[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pte.page_base_addr(), cur_addr, cur_addr);
-        }
-    }
-
-    Ok(pd_start)
-}
-
-fn hrt_setup_pae_page_tables(
-    mem: &GuestMemory,
-    sregs: &mut kvm_sregs,
-    hrt_header: mb2::HeaderHybridRuntime,
-) -> Result<GuestAddress> {
-    let min_addr = 0;
-    let max_addr = mem.end_addr().0;
-    
-    println!("guest phys mem: {:#X} - {:#X}\nguest virt mem: {:#X} - {:#X}", min_addr, max_addr, min_addr, max_addr);
-
-    let (num_pdp, num_pd, num_pt) = hrt_compute_pae_pts(mem);
-    println!("{} PDP, {} PD, {} PT", num_pdp, num_pd, num_pt);
-
-    let pdp_start = hrt_get_pae_pt_loc(mem);
-    let pd_start = pdp_start.unchecked_add(4096 * num_pdp);
-    let pt_start = pd_start.unchecked_add(4096 * num_pd);
-
-    println!("PDP @ {:#X}, PD @ {:#X}, PT @ {:#X}", pdp_start.0, pd_start.0, pt_start.0);
-
-    for i in 0..512 {
-        let cur_addr = min_addr + i*PAE_PDP_UNIT;
-
-        let mut pdpe = pml4::PAE_PDPe(0x0);
-
-        pdpe.set_present(true);
-
-        let pd_base_addr = page_align(pd_start.unchecked_add(i * PAGE_SIZE));
-
-        pdpe.set_pd_base_addr(pd_base_addr.0 as u64 >> 12);
-        let entry_loc = pdp_start.unchecked_add(8 * i);
-        
-        if cur_addr > max_addr {
-            mem.write_obj_at_addr(0x0 as u64, entry_loc);
-            continue;
-        }
-
-        mem.write_obj_at_addr(pdpe.0, entry_loc);
-        println!("PDP[{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, entry_loc.0, pdpe.pd_base_addr(), cur_addr, cur_addr);
-    }
-
-    for i in 0..num_pd {
-        let pd_addr = min_addr + i*PAE_PDP_UNIT;
-        for j in 0..512 { 
-            let cur_addr = pd_addr + j*PAE_PD_UNIT;
-            
-            let mut pde = pml4::PAE_PDe(0x0);
-            pde.set_present(true);
-            pde.set_writable(true);
-
-            let pt_base_addr = pt_start.unchecked_add((512*i + j) * PAGE_SIZE);
-            pde.set_pt_base_addr(pt_base_addr.0 as u64 >> 12);
-
-            let entry_loc = pd_start.unchecked_add(4096*i + 8*j);
-
-            if cur_addr > max_addr {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc);
-                continue;
-            }
-
-            mem.write_obj_at_addr(pde.0, entry_loc);
-            println!("PD[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pde.pt_base_addr(), cur_addr, cur_addr)
-        }
-    }
-
-    for i in 0..num_pt {
-        let pt_addr = min_addr + i*PAE_PD_UNIT;
-        for j in 0..512 {
-            let cur_addr = pt_addr + j*PAE_PT_UNIT;
-
-            let mut pte = pml4::PAE_PTe(0x0);
-            pte.set_present(true);
-            pte.set_writable(true);
-
-            pte.set_page_base_addr(cur_addr as u64 >> 12);
-
-            let entry_loc = pt_start.unchecked_add(4096*i + 8*j);
-
-            if cur_addr > max_addr {
-                mem.write_obj_at_addr(0x0 as u64, entry_loc);
-                continue;
-            }
-
-            mem.write_obj_at_addr(pte.0, entry_loc);
-            println!("PT[{}][{}] @ {:#X} -> {:#X} ({:#X} -> {:#X})", i, j, entry_loc.0, pte.page_base_addr(), cur_addr, cur_addr);
-        }
-    }
-    
-    Ok(pdp_start)
 }
 
 fn hrt_setup_page_tables(
