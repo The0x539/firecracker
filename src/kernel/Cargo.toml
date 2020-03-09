@@ -5,3 +5,4 @@ version = "0.1.0"
 [dependencies]
 vm-memory = { version = ">=0.1.0", features = ["backend-mmap"] }
 utils = { path = "../utils" }
+multiboot2-host = { version = "0.1.1", features = ["hvm"] }
