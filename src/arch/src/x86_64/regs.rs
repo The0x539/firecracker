@@ -62,7 +62,11 @@ pub fn setup_fpu(vcpu: &VcpuFd) -> Result<()> {
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
 /// * `boot_ip` - Starting instruction pointer.
-pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
+pub fn setup_regs(
+    vcpu: &VcpuFd,
+    boot_ip: u64,
+    opt_hrt_tag: Option<(u64, u64)>,
+) -> Result<()> {
     let regs: kvm_regs = kvm_regs {
         rflags: 0x0000_0000_0000_0002u64,
         rip: boot_ip,
@@ -86,7 +90,11 @@ pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64) -> Result<()> {
 ///
 /// * `mem` - The memory that will be passed to the guest.
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &VcpuFd) -> Result<()> {
+pub fn setup_sregs(
+    mem: &GuestMemoryMmap,
+    vcpu: &VcpuFd,
+    opt_hrt_tag: Option<(u64, u64)>,
+) -> Result<()> {
     let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
 
     configure_segments_and_sregs(mem, &mut sregs)?;

@@ -290,7 +290,13 @@ impl Vmm {
     }
 
     /// Configures the system for boot.
-    pub fn configure_system(&self, vcpus: &[Vcpu], initrd: &Option<InitrdConfig>) -> Result<()> {
+    pub fn configure_system(
+        &self,
+        vcpus: &[Vcpu],
+        initrd: &Option<InitrdConfig>,
+        #[cfg(target_arch = "x86_64")]
+        opt_hrt_tag: Option<(u64, u64)>,
+    ) -> Result<()> {
         #[cfg(target_arch = "x86_64")]
         arch::x86_64::configure_system(
             &self.guest_memory,
@@ -298,6 +304,7 @@ impl Vmm {
             self.kernel_cmdline.len() + 1,
             initrd,
             vcpus.len() as u8,
+            opt_hrt_tag,
         )
         .map_err(Error::ConfigureSystem)?;
 

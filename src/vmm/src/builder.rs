@@ -250,6 +250,9 @@ pub fn build_microvm(
             .ok_or(StartMicrovmError::MissingMemSizeConfig)?,
     )?;
     let vcpu_config = vm_resources.vcpu_config();
+    #[cfg(target_arch = "x86_64")]
+    let (entry_addr, opt_hrt_tag) = load_kernel(boot_config, &guest_memory)?;
+    #[cfg(not(target_arch = "x86_64"))]
     let entry_addr = load_kernel(boot_config, &guest_memory)?;
     let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
     // Clone the command-line so that a failed boot doesn't pollute the original.
@@ -313,6 +316,7 @@ pub fn build_microvm(
             request_ts,
             &pio_device_manager.io_bus,
             &exit_evt,
+            opt_hrt_tag,
         )
         .map_err(StartMicrovmError::Internal)?;
     }
@@ -365,7 +369,12 @@ pub fn build_microvm(
     #[cfg(target_arch = "x86_64")]
     load_cmdline(&vmm)?;
 
-    vmm.configure_system(vcpus.as_slice(), &initrd)
+    vmm.configure_system(
+        vcpus.as_slice(),
+        &initrd,
+        #[cfg(target_arch = "x86_64")]
+        opt_hrt_tag,
+    )
         .map_err(StartMicrovmError::Internal)?;
     // Firecracker uses the same seccomp filter for all threads.
     vmm.start_vcpus(vcpus, seccomp_filter.to_vec(), seccomp_filter)
@@ -393,17 +402,17 @@ pub fn create_guest_memory(
 fn load_kernel(
     boot_config: &BootConfig,
     guest_memory: &GuestMemoryMmap,
-) -> std::result::Result<GuestAddress, StartMicrovmError> {
+) -> std::result::Result<(GuestAddress, Option<(u64, u64)>), StartMicrovmError> {
     let mut kernel_file = boot_config
         .kernel_file
         .try_clone()
         .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
 
-    let entry_addr =
+    let load_result =
         kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
             .map_err(StartMicrovmError::KernelLoader)?;
 
-    Ok(entry_addr)
+    Ok(load_result)
 }
 
 fn load_initrd_from_config(
@@ -593,6 +602,7 @@ fn create_vcpus_x86_64(
     request_ts: TimestampUs,
     io_bus: &devices::Bus,
     exit_evt: &EventFd,
+    opt_hrt_tag: Option<(u64, u64)>,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     for cpu_index in 0..vcpu_config.vcpu_count {
@@ -607,7 +617,7 @@ fn create_vcpus_x86_64(
         )
         .map_err(Error::Vcpu)?;
 
-        vcpu.configure_x86_64(guest_mem, entry_addr, vcpu_config)
+        vcpu.configure_x86_64(guest_mem, entry_addr, vcpu_config, opt_hrt_tag)
             .map_err(Error::Vcpu)?;
 
         vcpus.push(vcpu);

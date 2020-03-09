@@ -107,6 +107,7 @@ pub fn configure_system(
     cmdline_size: usize,
     initrd: &Option<InitrdConfig>,
     num_cpus: u8,
+    opt_hrt_tag: Option<(u64, u64)>,
 ) -> super::Result<()> {
     const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
     const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;

@@ -75,7 +75,7 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemoryMmap,
     mut kernel_image: &mut F, // No idea why this is necessary.
     start_address: u64,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, Option<(u64, u64)>)>
 where
     F: Read + Seek,
 {
@@ -87,8 +87,15 @@ where
         let mb2_addr = mb2_hdr::find_header(&mut kernel_image)
             .map_err(|_| Error::ReadKernelDataStruct("Failed to search for Multiboot2 header"))?;
         match mb2_addr {
-            Some(offset) => load_mb2_kernel(guest_mem, kernel_image, offset),
-            None => load_elf_kernel(guest_mem, kernel_image, start_address),
+            Some(offset) => {
+                let (entry_addr, hrt_tag) = load_mb2_kernel(guest_mem, kernel_image, offset)?;
+                return Ok((entry_addr, Some(hrt_tag)));
+            }
+
+            None => {
+                let entry_addr = load_elf_kernel(guest_mem, kernel_image, start_address)?;
+                return Ok((entry_addr, None));
+            }
         }
     }
 }
@@ -98,7 +105,7 @@ fn load_mb2_kernel<F: Read + Seek>(
     guest_mem: &GuestMemoryMmap,
     mut kernel_image: &mut F,
     mb2_location: u64,
-) -> Result<GuestAddress> {
+) -> Result<(GuestAddress, (u64, u64))> {
     let mut opt_load_addrs = None;
     let mut opt_entry_addr = None;
     let mut opt_hrt_tag = None;
@@ -191,7 +198,7 @@ fn load_mb2_kernel<F: Read + Seek>(
         .write_slice(&vec![0 as u8; bss_len], bss_addr)
         .map_err(|_| Error::ReadKernelImage)?;
 
-    return Ok(entry_addr);
+    Ok((entry_addr, hrt_tag))
 }
 
 /// Loads a kernel from a vmlinux elf image to a slice
