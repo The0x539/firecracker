@@ -8,6 +8,8 @@ extern crate kvm_bindings;
 extern crate kvm_ioctls;
 extern crate libc;
 
+extern crate bitfield;
+
 extern crate arch_gen;
 extern crate utils;
 extern crate vm_memory;

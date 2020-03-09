@@ -15,6 +15,8 @@ mod mptable;
 pub mod msr;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
+/// Data structures for page tables.
+pub mod pml4;
 
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
 extern crate multiboot2_host;
