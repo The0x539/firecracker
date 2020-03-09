@@ -17,6 +17,8 @@ pub mod msr;
 pub mod regs;
 
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
+extern crate multiboot2_host;
+use self::multiboot2_host::bootinfo;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
 };
@@ -44,6 +46,8 @@ pub enum Error {
     ZeroPageSetup,
     /// Failed to compute initrd address.
     InitrdAddress,
+    /// Error setting up Multiboot2 bootinfo.
+    Multiboot2Setup,
 }
 
 // Where BIOS/VGA magic would live on a real PC.
@@ -92,6 +96,82 @@ pub fn initrd_load_addr(guest_mem: &GuestMemoryMmap, initrd_size: usize) -> supe
     Ok(align_to_pagesize(lowmem_size - initrd_size) as u64)
 }
 
+/// Chooses the appropriate configure_system impl.
+pub fn configure_system(
+    guest_mem: &GuestMemoryMmap,
+    cmdline_addr: GuestAddress,
+    cmdline_size: usize,
+    initrd: &Option<InitrdConfig>,
+    num_cpus: u8,
+    opt_hrt_tag: Option<(u64, u64)>,
+) -> super::Result<()> {
+    match opt_hrt_tag {
+        Some((flags, gva_offset)) => hrt_configure_system(guest_mem, num_cpus, flags, gva_offset),
+        None => bootparam_configure_system(guest_mem, cmdline_addr, cmdline_size, initrd, num_cpus),
+    }
+}
+
+/// Populates guest memory with Multiboot2 bootinfo tags.
+fn hrt_configure_system(
+    guest_mem: &GuestMemoryMmap,
+    num_cpus: u8,
+    flags: u64,
+    gva_offset: u64,
+) -> super::Result<()> {
+    let regions = std::cell::RefCell::new(Vec::new());
+    guest_mem.with_regions::<_, ()>(|_index, region| {
+        regions.borrow_mut().push(bootinfo::MemMapEntry {
+            base_addr: region.start_addr().0 as u64,
+            length: region.len() as u64,
+            entry_type: 1, // available
+        });
+        Ok(())
+    }).map_err(|_| Error::Multiboot2Setup)?;
+
+    let tags = [
+        bootinfo::Tag::HybridRuntime {
+            total_num_apics: num_cpus as u32,
+            first_hrt_apic_id: 0, // TODO: actual HRT setup
+            have_hrt_ioapic: false,
+            first_hrt_ioapic_entry: 0x0, // ???
+            cpu_freq_khz: 1024, // TODO: ???
+            hrt_flags: flags,
+            max_mem_mapped: guest_mem.last_addr().0 + 1 as u64, // possibly wrong
+            first_hrt_gpa: 0x0,
+            boot_state_gpa: 0x0, // TODO: ???
+            gva_offset: gva_offset,
+            comm_page_gpa: 0x0, // TODO: ???
+            hrt_int_vector: 0x0, // TODO: ???
+        },
+        bootinfo::Tag::BasicMeminfo {
+            mem_lower: 640, // thank you, bill gates
+            mem_upper: ((guest_mem.last_addr().0 + 1 - 1024*1024) / 1024) as u32, // possibly wrong
+        },
+        bootinfo::Tag::MemMap {
+            entries: regions.into_inner(),
+        },
+        bootinfo::Tag::End,
+    ];
+
+    // Assume for the time being that we have space below the kernel
+    let mb_addr = GuestAddress(layout::ZERO_PAGE_START);
+    let mb_size = bootinfo::bootinfo_size(&tags) as usize;
+    guest_mem
+        .checked_offset(mb_addr, mb_size)
+        .ok_or(Error::Multiboot2Setup)?;
+
+    // TODO: write directly to guest memory?
+    let mut buf = vec![0 as u8; mb_size];
+    bootinfo::write_bootinfo(&tags, std::io::Cursor::new(&mut buf), 0)
+        .map_err(|_| Error::Multiboot2Setup)?;
+
+    guest_mem
+        .write_slice(&buf, mb_addr)
+        .map_err(|_| Error::Multiboot2Setup)?;
+
+    Ok(())
+}
+
 /// Configures the system and should be called once per vm before starting vcpu threads.
 ///
 /// # Arguments
@@ -101,13 +181,12 @@ pub fn initrd_load_addr(guest_mem: &GuestMemoryMmap, initrd_size: usize) -> supe
 /// * `cmdline_size` - Size of the kernel command line in bytes including the null terminator.
 /// * `initrd` - Information about where the ramdisk image was loaded in the `guest_mem`.
 /// * `num_cpus` - Number of virtual CPUs the guest will have.
-pub fn configure_system(
+fn bootparam_configure_system(
     guest_mem: &GuestMemoryMmap,
     cmdline_addr: GuestAddress,
     cmdline_size: usize,
     initrd: &Option<InitrdConfig>,
     num_cpus: u8,
-    opt_hrt_tag: Option<(u64, u64)>,
 ) -> super::Result<()> {
     const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
     const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;
