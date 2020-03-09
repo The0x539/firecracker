@@ -13,7 +13,6 @@ use kvm_ioctls::VcpuFd;
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
 use arch_gen::x86::msr_index;
 use memory_model::{GuestAddress, GuestMemory};
-use x86_64::multiboot2 as mb2;
 use x86_64::pml4::{self, PagingLevel};
 
 // Initial pagetables.
@@ -152,7 +151,7 @@ pub fn setup_sregs(
     mem: &GuestMemory,
     vcpu: &VcpuFd,
     is_multiboot: bool,
-    hrt_header: Option<mb2::HeaderHybridRuntime>
+    hrt_header: Option<(u64, u64)>
 ) -> Result<()> {
     if is_multiboot {
         return mb_setup_sregs(mem, vcpu, hrt_header);
@@ -177,12 +176,12 @@ fn linux_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd) -> Result<()> {
 }
 
 
-fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, hrt_header: Option<mb2::HeaderHybridRuntime>) -> Result<()> {
+fn mb_setup_sregs(mem: &GuestMemory, vcpu: &VcpuFd, hrt_header: Option<(u64, u64)>) -> Result<()> {
     let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
     mb_configure_segments_and_sregs(mem, &mut sregs)?;
     match hrt_header {
-        Some(hdr) => {
-            hrt_setup_page_tables(mem, &mut sregs, hdr)?;
+        Some((flags, offset)) => {
+            hrt_setup_page_tables(mem, &mut sregs, flags, offset)?;
         },
         None => ()
     }
@@ -416,23 +415,24 @@ fn hrt_get_pt_loc(
 fn hrt_setup_page_tables(
     guest_mem: &GuestMemory,
     sregs: &mut kvm_sregs,
-    hrt_header: mb2::HeaderHybridRuntime,
+    hrt_flags: u64,
+    hrt_hihalf_offset: u64,
 ) -> Result<()> {
     let min_gpa: usize = 0;
     let max_gpa: usize = guest_mem.end_addr().0;
-    let min_gva: usize = hrt_header.hrt_hihalf_offset as usize;
+    let min_gva: usize = hrt_hihalf_offset as usize;
     let max_gva: usize = min_gva + max_gpa;
 
     println!("guest phys mem: {:#X} - {:#X}\nguest virt mem: {:#X} - {:#X}", min_gpa, max_gpa, min_gva, max_gva);
 
     let paging_level = {
-        if hrt_header.flags.map_512gb() {
+        if hrt_flags & 0x800 != 0 {
             PagingLevel::Colossal
-        } else if hrt_header.flags.map_1gb() {
+        } else if hrt_flags & 0x400 != 0 {
             PagingLevel::Huge
-        } else if hrt_header.flags.map_2mb() {
+        } else if hrt_flags & 0x200 != 0 {
             PagingLevel::Large
-        } else if hrt_header.flags.map_4kb() {
+        } else if hrt_flags & 0x100 != 0 {
             PagingLevel::Normal
         } else {
             PagingLevel::Large // a sane default

@@ -79,8 +79,6 @@ use kernel::cmdline as kernel_cmdline;
 use kernel::loader as kernel_loader;
 use logger::error::LoggerError;
 #[cfg(target_arch = "x86_64")]
-use arch::x86_64::multiboot2 as mb2;
-#[cfg(target_arch = "x86_64")]
 use logger::LogOption;
 use logger::{AppInfo, Level, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory};
@@ -715,7 +713,7 @@ struct KernelConfig {
     #[cfg(target_arch = "x86_64")]
     cmdline_addr: GuestAddress,
     #[cfg(target_arch = "x86_64")]
-    hrt_header: Option<mb2::HeaderHybridRuntime>,
+    hrt_header: Option<(u64, u64)>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     is_multiboot: bool,
 }

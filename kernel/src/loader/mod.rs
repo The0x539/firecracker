@@ -17,7 +17,6 @@ use super::cmdline::Error as CmdlineError;
 use memory_model::{GuestAddress, GuestMemory};
 use sys_util;
 
-use arch::x86_64::multiboot2 as mb2;
 use arch::x86_64::multiboot2_host::header as mb2_header;
 
 #[allow(non_camel_case_types)]
@@ -73,7 +72,7 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemory,
     mut kernel_image: &mut F,
     start_address: usize,
-) -> Result<(GuestAddress, bool, Option<mb2::HeaderHybridRuntime>)>
+) -> Result<(GuestAddress, bool, Option<(u64, u64)>)>
 where
     F: Read + Seek,
 {
@@ -91,14 +90,14 @@ fn load_mb2_kernel<F>(
     mut kernel_image: &mut F,
     _start_address: usize,
     mb2_location: u64,
-) -> Result<(GuestAddress, Option<mb2::HeaderHybridRuntime>)>
+) -> Result<(GuestAddress, Option<(u64, u64)>)>
 where
     F: Read + Seek,
 {
     let mut opt_load_addrs: Option<(u64, u64, u64, u64)> = None;
     let mut opt_entry_addr: Option<GuestAddress> = None;
 
-    let mut opt_hrt_tag: Option<mb2::HeaderHybridRuntime> = None;
+    let mut opt_hrt_tag: Option<(u64, u64)> = None;
 
     let iter = mb2_header::iter_tags(&mut kernel_image, mb2_location)
         .map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 header tags"))?;
@@ -115,15 +114,8 @@ where
             mb2_header::Tag::EntryAddr(addr) => {
                 opt_entry_addr = Some(GuestAddress(addr as usize));
             }
-            mb2_header::Tag::HybridRuntime(flags, gpa_map_req, hrt_hihalf_offset, nautilus_entry_gva, comm_page_gpa, int_vec) => {
-                opt_hrt_tag = Some(mb2::HeaderHybridRuntime {
-                    flags: mb2::HybridRuntimeFlags(flags),
-                    gpa_map_req,
-                    hrt_hihalf_offset,
-                    nautilus_entry_gva,
-                    comm_page_gpa,
-                    int_vec,
-                });
+            mb2_header::Tag::HybridRuntime(flags, _gpa_map_req, hrt_hihalf_offset, _nautilus_entry_gva, _comm_page_gpa, _int_vec) => {
+                opt_hrt_tag = Some((flags, hrt_hihalf_offset));
             }
             mb2_header::Tag::Unknown(_,_,_) => {
                 return Err(Error::ReadKernelDataStruct("Unknown Multiboot2 header tag"));

@@ -11,7 +11,6 @@ pub mod layout;
 mod mptable;
 pub mod regs;
 
-pub mod multiboot2;
 pub mod pml4;
 
 use std::mem;

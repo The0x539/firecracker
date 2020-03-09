@@ -257,7 +257,7 @@ impl Vcpu {
         kernel_start_addr: GuestAddress,
         vm: &Vm,
         is_multiboot: bool,
-        hrt_header: Option<arch::x86_64::multiboot2::HeaderHybridRuntime>,
+        hrt_header: Option<(u64, u64)>,
     ) -> Result<()> {
         let cpuid_vm_spec = VmSpec::new(
             self.id,
