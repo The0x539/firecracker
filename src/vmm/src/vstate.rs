@@ -1027,7 +1027,17 @@ impl Vcpu {
                 VcpuExit::IoOut(addr, data) => {
                     self.check_boot_complete_signal(u64::from(addr), data);
 
-                    self.io_bus.write(u64::from(addr), data);
+                    match addr {
+                        0x7C4 => {
+                            println!("output on magic port: {:#02X} {:02X} {:02X} {:02X}", data[3], data[2], data[1], data[0]);
+                        }
+                        0xC0C0 => {
+                            print!("{}", data[0] as char);
+                        }
+                        _ => {
+                            self.io_bus.write(u64::from(addr), data);
+                        }
+                    }
                     METRICS.vcpu.exit_io_out.inc();
                     Ok(VcpuEmulation::Handled)
                 }
