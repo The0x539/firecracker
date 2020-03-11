@@ -159,10 +159,12 @@ fn write_gdt_table(table: &[u64], guest_mem: &GuestMemoryMmap) -> Result<()> {
 fn write_gdt_table_at_addr(
     table: &[u64],
     guest_mem: &GuestMemoryMmap,
-    addr: GuestAddress,
+    gdt_base: GuestAddress,
 ) -> Result<()> {
-    let boot_gdt_addr = GuestAddress(BOOT_GDT_OFFSET);
     for (index, entry) in table.iter().enumerate() {
+        let addr = guest_mem
+            .checked_offset(gdt_base, index * mem::size_of::<u64>())
+            .ok_or(Error::WriteGDT)?;
         guest_mem
             .write_obj(*entry, addr)
             .map_err(|_| Error::WriteGDT)?;
