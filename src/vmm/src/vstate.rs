@@ -41,6 +41,7 @@ use vm_memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
 };
 use vmm_config::machine_config::CpuFeaturesTemplate;
+use byteorder::{ByteOrder, NativeEndian};
 
 #[cfg(target_arch = "x86_64")]
 const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x03f0;
@@ -1011,6 +1012,98 @@ impl Vcpu {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn handle_hypercall(&mut self, hcall_no: u32) -> Result<VcpuEmulation> {
+        println!("output on magic port: {:#08X}", hcall_no);
+
+        let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+
+        #[allow(unused_variables)]
+        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
+
+
+        macro_rules! nyi {
+            () => {
+                {
+                    println!("NYI hypercall: {:#08X}", hcall_no);
+                    regs.rax = u64::max_value(); // assigning -1 to unsigned numbers is fun, thanks C
+                }
+            }
+        }
+
+        match hcall_no {
+            // TODO: move my pseudo_enum thing into a separate crate and use it here?
+
+            // null
+            0x0 => {
+                regs.rax = 0;
+            }
+
+            // reset ROS
+            0x1 => nyi!(),
+
+            // reset HRT
+            0x2 => nyi!(),
+
+            // reset both
+            0x3 => nyi!(),
+
+            // replace HRT image
+            0x8 => nyi!(),
+
+            // get HRT state
+            0xF => nyi!(),
+
+            // unlabeled
+            0x10 => nyi!(),
+
+            // ack result (HRT has read the result of the finished event)
+            0x1E => nyi!(),
+
+            // unlabeled
+            0x1F => nyi!(),
+
+            // invoke [parallel] function (ROS -> HRT)
+            0x20 | 0x21 => nyi!(),
+
+            // setup/teardown for synchronous operation (ROS -> HRT)
+            0x28 | 0x29 => nyi!(),
+
+            // function exec or sync done
+            0x2F => nyi!(),
+
+            // merge/unmerge address space
+            0x30 | 0x31 => nyi!(),
+
+            // merge operation done
+            0x3F => nyi!(),
+
+            // install/remove signal handler
+            0x40 => nyi!(),
+
+            // raise signal in the ROS from HRT or ROS
+            0x41 => nyi!(),
+
+            // fill GDT area (HRT only)
+            0x51 => nyi!(),
+
+            // register HRT GDT area
+            0x52 => nyi!(),
+
+            // restore GDT
+            0x53 => nyi!(),
+
+            _ => {
+                regs.rax = u64::max_value();
+                println!("unknown hypercall {:08X}", hcall_no);
+            }
+        }
+
+        self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+
+        Ok(VcpuEmulation::Handled)
+    }
+
     /// Runs the vCPU in KVM context and handles the kvm exit reason.
     ///
     /// Returns error or enum specifying whether emulation was handled or interrupted.
@@ -1029,7 +1122,8 @@ impl Vcpu {
 
                     match addr {
                         0x7C4 => {
-                            println!("output on magic port: {:#02X} {:02X} {:02X} {:02X}", data[3], data[2], data[1], data[0]);
+                            let hcall_no = NativeEndian::read_u32(data);
+                            return self.handle_hypercall(hcall_no);
                         }
                         0xC0C0 => {
                             print!("{}", data[0] as char);

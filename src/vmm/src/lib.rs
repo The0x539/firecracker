@@ -31,6 +31,7 @@ extern crate rate_limiter;
 extern crate seccomp;
 extern crate utils;
 extern crate vm_memory;
+extern crate byteorder;
 
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
