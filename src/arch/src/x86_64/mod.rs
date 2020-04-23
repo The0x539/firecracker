@@ -120,9 +120,9 @@ fn hrt_configure_system(
     flags: u64,
     gva_offset: u64,
 ) -> super::Result<()> {
-    let regions = std::cell::RefCell::new(Vec::new());
-    guest_mem.with_regions::<_, ()>(|_index, region| {
-        regions.borrow_mut().push(bootinfo::MemMapEntry {
+    let mut regions = Vec::new();
+    guest_mem.with_regions_mut::<_, ()>(|_index, region| {
+        regions.push(bootinfo::MemMapEntry {
             base_addr: region.start_addr().0 as u64,
             length: region.len() as u64,
             entry_type: 1, // available
@@ -150,7 +150,7 @@ fn hrt_configure_system(
             mem_upper: ((guest_mem.last_addr().0 + 1 - 1024*1024) / 1024) as u32, // possibly wrong
         },
         bootinfo::Tag::MemMap {
-            entries: regions.into_inner(),
+            entries: regions,
         },
         bootinfo::Tag::End,
     ];
