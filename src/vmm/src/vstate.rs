@@ -605,6 +605,13 @@ pub struct Vcpu {
     response_receiver: Option<Receiver<VcpuResponse>>,
     // The transmitting end of the responses channel owned by the vcpu side.
     response_sender: Sender<VcpuResponse>,
+
+    hcall_sender: Sender<VcpuHcall>,
+    hcall_receiver: Option<Receiver<VcpuHcall>>,
+    hret_sender: Option<Sender<u64>>,
+    hret_receiver: Receiver<u64>,
+
+    hrt_tag: Option<(u64, u64)>,
 }
 
 impl Vcpu {
@@ -714,6 +721,8 @@ impl Vcpu {
         let kvm_vcpu = vm_fd.create_vcpu(id).map_err(Error::VcpuFd)?;
         let (event_sender, event_receiver) = channel();
         let (response_sender, response_receiver) = channel();
+        let (hcall_sender, hcall_receiver) = channel();
+        let (hret_sender, hret_receiver) = channel();
 
         // Initially the cpuid per vCPU is the one supported by this VM.
         Ok(Vcpu {
@@ -729,6 +738,12 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
+
+            hcall_sender,
+            hcall_receiver: Some(hcall_receiver),
+            hret_sender: Some(hret_sender),
+            hret_receiver,
+            hrt_tag: None,
         })
     }
 
@@ -820,6 +835,8 @@ impl Vcpu {
             .set_cpuid2(&self.cpuid)
             .map_err(Error::VcpuSetCpuid)?;
 
+        self.hrt_tag = opt_hrt_tag;
+
         arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
         arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value(), opt_hrt_tag)
             .map_err(Error::REGSConfiguration)?;
@@ -871,6 +888,8 @@ impl Vcpu {
     pub fn start_threaded(mut self, seccomp_filter: BpfProgram) -> Result<VcpuHandle> {
         let event_sender = self.event_sender.take().unwrap();
         let response_receiver = self.response_receiver.take().unwrap();
+        let hcall_receiver = self.hcall_receiver.take().unwrap();
+        let hret_sender = self.hret_sender.take().unwrap();
         let vcpu_thread = thread::Builder::new()
             .name(format!("fc_vcpu {}", self.cpu_index()))
             .spawn(move || {
@@ -885,6 +904,9 @@ impl Vcpu {
             event_sender,
             response_receiver,
             vcpu_thread,
+
+            hcall_receiver,
+            hret_sender,
         })
     }
 
@@ -1012,6 +1034,7 @@ impl Vcpu {
         Ok(())
     }
 
+    #[allow(unused)]
     #[cfg(target_arch = "x86_64")]
     fn handle_hypercall(&mut self, hcall_no: u32) -> Result<VcpuEmulation> {
         println!("output on magic port: {:#08X}", hcall_no);
@@ -1104,6 +1127,40 @@ impl Vcpu {
         Ok(VcpuEmulation::Handled)
     }
 
+    fn send_hcall(&mut self, hcall_no: u32) -> Result<VcpuEmulation> {
+        println!("output on magic port: {:#08X}", hcall_no);
+        let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
+        let state = match hcall_no {
+            0x0 => {
+                regs.rax = 0;
+                VcpuEmulation::Handled
+            }
+            0x1 | 0x2 | 0x3 | 0x4 => {
+                let hcall = match hcall_no {
+                    0x1 => VcpuHcall::Open { pathname: a1, flags: a2, mode: a3 },
+                    0x2 => VcpuHcall::Read { fd: a1, buf: a2, count: a3 },
+                    0x3 => VcpuHcall::Write { fd: a1, buf: a2, count: a3 },
+                    0x4 => VcpuHcall::Close { fd: a1 },
+                    _ => unreachable!(),
+                };
+                self.hcall_sender
+                    .send(hcall)
+                    .expect("Couldn't send hcall");
+                VcpuEmulation::Hcall
+            }
+            _ => {
+                regs.rax = std::u64::MAX;
+                println!("unknown hypercall {:08X}", hcall_no);
+                VcpuEmulation::Handled
+            }
+        };
+        if state == VcpuEmulation::Handled {
+            self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        }
+        Ok(state)
+    }
+
     /// Runs the vCPU in KVM context and handles the kvm exit reason.
     ///
     /// Returns error or enum specifying whether emulation was handled or interrupted.
@@ -1123,7 +1180,7 @@ impl Vcpu {
                     match addr {
                         0x7C4 => {
                             let hcall_no = NativeEndian::read_u32(data);
-                            return self.handle_hypercall(hcall_no);
+                            return self.send_hcall(hcall_no);
                         }
                         0xC0C0 => {
                             print!("{}", data[0] as char);
@@ -1238,6 +1295,9 @@ impl Vcpu {
                 // seccomp failure because musl calls `sigprocmask` as part of `pthread_exit`.
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
+
+                Ok(VcpuEmulation::Hcall) => return StateMachine::next(Self::awaiting_hret),
+
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
             }
@@ -1295,6 +1355,20 @@ impl Vcpu {
             // Unhandled exit of the other end.
             Err(_) => {
                 // Move to 'exited' state.
+                self.exit(FC_EXIT_CODE_GENERIC_ERROR)
+            }
+        }
+    }
+
+    fn awaiting_hret(&mut self) -> StateMachine<Self> {
+        match self.hret_receiver.recv() {
+            Ok(retval) => {
+                let mut regs = self.fd.get_regs().unwrap();
+                regs.rax = retval;
+                self.fd.set_regs(&regs).unwrap();
+                StateMachine::next(Self::running)
+            }
+            Err(_) => {
                 self.exit(FC_EXIT_CODE_GENERIC_ERROR)
             }
         }
@@ -1370,11 +1444,22 @@ pub enum VcpuResponse {
     Exited(u8),
 }
 
+#[derive(Debug)]
+pub enum VcpuHcall {
+    Open { pathname: u64, flags: u64, mode: u64 },
+    Read { fd: u64, buf: u64, count: u64 },
+    Write { fd: u64, buf: u64, count: u64 },
+    Close { fd: u64 },
+}
+
 /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
 pub struct VcpuHandle {
     event_sender: Sender<VcpuEvent>,
     response_receiver: Receiver<VcpuResponse>,
     vcpu_thread: thread::JoinHandle<()>,
+
+    hcall_receiver: Receiver<VcpuHcall>,
+    hret_sender: Sender<u64>,
 }
 
 impl VcpuHandle {
@@ -1400,10 +1485,12 @@ impl VcpuHandle {
     }
 }
 
+#[derive(PartialEq)]
 enum VcpuEmulation {
     Handled,
     Interrupted,
     Stopped,
+    Hcall,
 }
 
 #[cfg(test)]
