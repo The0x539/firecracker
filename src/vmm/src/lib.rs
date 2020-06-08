@@ -384,6 +384,43 @@ impl Vmm {
     pub fn kvm_vm(&self) -> &Vm {
         &self.vm
     }
+
+    /// Receives each core's pending hcalls and fulfills them.
+    pub fn handle_hcalls(&mut self) {
+        use vstate::VcpuHcall;
+        for handle in &self.vcpus_handles {
+            for hcall in handle.iter_hcalls() {
+                assert_eq!(
+                    std::mem::size_of::<usize>(),
+                    std::mem::size_of::<u64>(),
+                    "all of this only works on 64-bit stuff...",
+                );
+
+                const ERR: u64 = std::u64::MAX;
+
+                #[allow(unused_variables)]
+                let retval = match hcall {
+                    VcpuHcall::Open { pathname, flags, mode } => {
+                        // TODO
+                        ERR
+                    },
+                    VcpuHcall::Read { fd, buf, count } => {
+                        // TODO
+                        ERR
+                    },
+                    VcpuHcall::Write { fd, buf, count } => {
+                        // TODO
+                        ERR
+                    },
+                    VcpuHcall::Close { fd } => {
+                        // TODO
+                        ERR
+                    },
+                };
+                handle.send_hret(retval).expect("hret receiver closed");
+            }
+        }
+    }
 }
 
 impl Subscriber for Vmm {

@@ -1483,6 +1483,14 @@ impl VcpuHandle {
     pub fn join_vcpu_thread(self) -> thread::Result<()> {
         self.vcpu_thread.join()
     }
+
+    pub fn iter_hcalls(&self) -> impl Iterator<Item = VcpuHcall> + '_ {
+        self.hcall_receiver.try_iter()
+    }
+
+    pub fn send_hret(&self, retval: u64) -> std::result::Result<(), std::sync::mpsc::SendError<u64>> {
+        self.hret_sender.send(retval)
+    }
 }
 
 #[derive(PartialEq)]

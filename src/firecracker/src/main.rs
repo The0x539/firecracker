@@ -210,7 +210,7 @@ fn main() {
             start_time_cpu_us,
         );
     } else {
-        run_without_api(seccomp_filter, vmm_config_json);
+        run_custom(seccomp_filter, vmm_config_json);
     }
 }
 
@@ -241,6 +241,7 @@ fn build_microvm_from_json(
     (vm_resources, vmm)
 }
 
+#[allow(dead_code)]
 fn run_without_api(seccomp_filter: BpfProgram, config_json: Option<String>) {
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
 
@@ -269,5 +270,20 @@ fn run_without_api(seccomp_filter: BpfProgram, config_json: Option<String>) {
     // Run the EventManager that drives everything in the microVM.
     loop {
         event_manager.run().unwrap();
+    }
+}
+
+fn run_custom(seccomp_filter: BpfProgram, config_json: Option<String>) {
+    let mut event_manager = EventManager::new().unwrap();
+
+    let (_resources, vmm) = build_microvm_from_json(
+        seccomp_filter,
+        &mut event_manager,
+        config_json.unwrap(),
+    );
+
+    loop {
+        event_manager.run_with_timeout(100).unwrap();
+        vmm.lock().unwrap().handle_hcalls()
     }
 }
