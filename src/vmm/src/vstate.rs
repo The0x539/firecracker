@@ -1138,9 +1138,9 @@ impl Vcpu {
             }
             0x1 | 0x2 | 0x3 | 0x4 => {
                 let hcall = match hcall_no {
-                    0x1 => VcpuHcall::Open { pathname: a1, flags: a2, mode: a3 },
-                    0x2 => VcpuHcall::Read { fd: a1, buf: a2, count: a3 },
-                    0x3 => VcpuHcall::Write { fd: a1, buf: a2, count: a3 },
+                    0x1 => VcpuHcall::Open { pathname: GuestAddress(a1), flags: a2, mode: a3 },
+                    0x2 => VcpuHcall::Read { fd: a1, buf: GuestAddress(a2), count: a3 },
+                    0x3 => VcpuHcall::Write { fd: a1, buf: GuestAddress(a2), count: a3 },
                     0x4 => VcpuHcall::Close { fd: a1 },
                     _ => unreachable!(),
                 };
@@ -1446,9 +1446,9 @@ pub enum VcpuResponse {
 
 #[derive(Debug)]
 pub enum VcpuHcall {
-    Open { pathname: u64, flags: u64, mode: u64 },
-    Read { fd: u64, buf: u64, count: u64 },
-    Write { fd: u64, buf: u64, count: u64 },
+    Open { pathname: GuestAddress, flags: u64, mode: u64 },
+    Read { fd: u64, buf: GuestAddress, count: u64 },
+    Write { fd: u64, buf: GuestAddress, count: u64 },
     Close { fd: u64 },
 }
 
