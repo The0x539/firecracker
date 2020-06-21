@@ -7,6 +7,7 @@
 
 use libc::{c_int, c_void, siginfo_t};
 use std::cell::Cell;
+use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
@@ -42,6 +43,7 @@ use vm_memory::{
 };
 use vmm_config::machine_config::CpuFeaturesTemplate;
 use byteorder::{ByteOrder, NativeEndian};
+use num_enum::TryFromPrimitive;
 
 #[cfg(target_arch = "x86_64")]
 const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x03f0;
@@ -1130,35 +1132,31 @@ impl Vcpu {
     fn send_hcall(&mut self, hcall_no: u32) -> Result<VcpuEmulation> {
         println!("output on magic port: {:#08X}", hcall_no);
         let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
-        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
-        let state = match hcall_no {
-            0x0 => {
-                regs.rax = 0;
-                VcpuEmulation::Handled
-            }
-            0x1 | 0x2 | 0x3 | 0x4 => {
-                let hcall = match hcall_no {
-                    0x1 => VcpuHcall::Open { pathname: GuestAddress(a1), flags: a2, mode: a3 },
-                    0x2 => VcpuHcall::Read { fd: a1, buf: GuestAddress(a2), count: a3 },
-                    0x3 => VcpuHcall::Write { fd: a1, buf: GuestAddress(a2), count: a3 },
-                    0x4 => VcpuHcall::Close { fd: a1 },
-                    _ => unreachable!(),
-                };
-                self.hcall_sender
-                    .send(hcall)
-                    .expect("Couldn't send hcall");
-                VcpuEmulation::Hcall
-            }
-            _ => {
-                regs.rax = std::u64::MAX;
-                println!("unknown hypercall {:08X}", hcall_no);
-                VcpuEmulation::Handled
-            }
-        };
-        if state == VcpuEmulation::Handled {
+
+        // TODO: a less trial-and-error control flow
+        if let Ok(id) = StdioHcallId::try_from(hcall_no) {
+            let hcall = VcpuHcall::Stdio {
+                id,
+                args: GuestAddress(regs.r8),
+            };
+            self.hcall_sender
+                .send(hcall)
+                .expect("Couldn't send hcall");
+
+            return Ok(VcpuEmulation::Hcall);
+        } else if hcall_no == 0 {
+            // Null hcall
+            regs.rax = 0;
             self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+
+            return Ok(VcpuEmulation::Handled);
+        } else {
+            regs.rax = std::u64::MAX;
+            println!("Unknown hypercall {:08x}", hcall_no);
+            self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+
+            return Ok(VcpuEmulation::Handled);
         }
-        Ok(state)
     }
 
     /// Runs the vCPU in KVM context and handles the kvm exit reason.
@@ -1364,7 +1362,7 @@ impl Vcpu {
         match self.hret_receiver.recv() {
             Ok(retval) => {
                 let mut regs = self.fd.get_regs().unwrap();
-                regs.rax = retval;
+                regs.r8 = retval;
                 self.fd.set_regs(&regs).unwrap();
                 StateMachine::next(Self::running)
             }
@@ -1444,12 +1442,20 @@ pub enum VcpuResponse {
     Exited(u8),
 }
 
-#[derive(Debug)]
+#[repr(u32)]
+#[derive(Debug, TryFromPrimitive)]
+pub enum StdioHcallId {
+    Open = 1,
+    Read = 2,
+    Write = 3,
+    Close = 4,
+}
+
 pub enum VcpuHcall {
-    Open { pathname: GuestAddress, flags: u64, mode: u64 },
-    Read { fd: u64, buf: GuestAddress, count: u64 },
-    Write { fd: u64, buf: GuestAddress, count: u64 },
-    Close { fd: u64 },
+    Stdio {
+        id: StdioHcallId,
+        args: GuestAddress,
+    },
 }
 
 /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
