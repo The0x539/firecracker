@@ -240,6 +240,7 @@ fn nautilus_configure_segments_and_sregs(
     sregs.gdt.base = gdt_loc;
     sregs.gdt.limit = 24;
 
+    #[rustfmt::skip]
     let vmx_null_int_handler: [u8; 30] = [
         0x50,
         0x53,
