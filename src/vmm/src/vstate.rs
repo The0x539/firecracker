@@ -1176,6 +1176,9 @@ impl Vcpu {
                     self.check_boot_complete_signal(u64::from(addr), data);
 
                     match addr {
+                        0x3F8..=0x3FF => {
+                            print!("{}", data[0] as char);
+                        }
                         0x7C4 => {
                             let hcall_no = NativeEndian::read_u32(data);
                             return self.send_hcall(hcall_no);
