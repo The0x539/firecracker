@@ -29,7 +29,6 @@ use utils::{
     signal::{register_signal_handler, sigrtmin, Killable},
     sm::StateMachine,
 };
-use vm_memory::GuestAddress;
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
@@ -113,9 +112,9 @@ pub struct Vcpu {
 
     // The receiving end of the delegation calls channel which will be given to the handler.
     hcall_sender: Sender<VcpuHcall>,
-    hcall_receiver: Option<Receiver<x86_64::VcpuHcall>>,
+    hcall_receiver: Option<Receiver<VcpuHcall>>,
     // The transmitting end of the delegation returns channel which will be given to the handler.
-    hret_sender: Option<Sender<x86_64::VcpuHret>>,
+    hret_sender: Option<Sender<VcpuHret>>,
     hret_receiver: Receiver<VcpuHret>,
 }
 
@@ -262,55 +261,6 @@ impl Vcpu {
         ))
     }
 
-    // TODO: move into arch-specific module, return arch-specific Option<VcpuHcall>
-    fn send_hcall(&mut self, hcall_no: u32) -> bool {
-        println!("output on magic port: {:#08X}", hcall_no);
-        let mut regs = self
-            .kvm_vcpu
-            .fd
-            .get_regs()
-            .expect("couldn't get regs when sending hcall");
-        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
-        match hcall_no {
-            0x0 => {
-                regs.rax = 0;
-            }
-            0x1 | 0x2 | 0x3 | 0x4 => {
-                let hcall = match hcall_no {
-                    0x1 => VcpuHcall::Open {
-                        pathname: GuestAddress(a1),
-                        flags: a2,
-                        mode: a3,
-                    },
-                    0x2 => VcpuHcall::Read {
-                        fd: a1,
-                        buf: GuestAddress(a2),
-                        count: a3,
-                    },
-                    0x3 => VcpuHcall::Write {
-                        fd: a1,
-                        buf: GuestAddress(a2),
-                        count: a3,
-                    },
-                    0x4 => VcpuHcall::Close { fd: a1 },
-                    _ => unreachable!(),
-                };
-                self.hcall_sender.send(hcall).expect("Couldn't send hcall");
-                return true;
-            }
-            _ => {
-                regs.rax = std::u64::MAX;
-                println!("unknown hypercall {:08X}", hcall_no);
-            }
-        };
-        self.kvm_vcpu
-            .fd
-            .set_regs(&regs)
-            .expect("couldn't set regs when handling hcall");
-
-        false
-    }
-
     /// Main loop of the vCPU thread.
     ///
     /// Runs the vCPU in KVM context in a loop. Handles KVM_EXITs then goes back in.
@@ -350,8 +300,8 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Hcall(hcall_no)) => {
-                    let should_wait = self.send_hcall(hcall_no);
-                    if should_wait {
+                    if let Some(hcall) = self.kvm_vcpu.build_hcall(hcall_no).unwrap() {
+                        self.hcall_sender.send(hcall).unwrap();
                         return StateMachine::next(Self::waiting_for_hret);
                     }
                 }
@@ -467,17 +417,9 @@ impl Vcpu {
     fn waiting_for_hret(&mut self) -> StateMachine<Self> {
         match self.hret_receiver.recv() {
             Ok(retval) => {
-                let mut regs = self
-                    .kvm_vcpu
-                    .fd
-                    .get_regs()
-                    .expect("couldn't get vcpu regs when handling hret");
-                regs.rax = retval.0;
                 self.kvm_vcpu
-                    .fd
-                    .set_regs(&regs)
-                    .expect("couldn't set vcpu regs when handling hret");
-
+                    .deliver_hret(retval)
+                    .expect("couldn't deliver hret");
                 StateMachine::next(Self::running)
             }
             Err(_) => self.exit(FC_EXIT_CODE_GENERIC_ERROR),
@@ -684,7 +626,7 @@ pub enum VcpuEmulation {
     Handled,
     Interrupted,
     Stopped,
-    Hcall(u32),
+    Hcall(VcpuHcallId),
 }
 
 #[cfg(test)]

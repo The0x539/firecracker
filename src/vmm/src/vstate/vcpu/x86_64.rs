@@ -139,7 +139,9 @@ impl Display for Error {
 
 type Result<T> = result::Result<T, Error>;
 
-pub struct VcpuHret(pub(super) u64);
+#[derive(PartialEq, Eq)]
+pub struct VcpuHcallId(u32);
+pub struct VcpuHret(u64);
 pub enum VcpuHcall {
     Open {
         pathname: GuestAddress,
@@ -376,7 +378,7 @@ impl KvmVcpu {
                 match addr {
                     0x7C4 => {
                         let hcall_no = NativeEndian::read_u32(data);
-                        return Ok(VcpuEmulation::Hcall(hcall_no));
+                        return Ok(VcpuEmulation::Hcall(VcpuHcallId(hcall_no)));
                     }
                     0xC0C0 => {
                         print!("{}", data[0] as char);
@@ -407,6 +409,55 @@ impl KvmVcpu {
                 )))
             }
         }
+    }
+
+    pub fn build_hcall(&mut self, hcall_no: VcpuHcallId) -> Result<Option<VcpuHcall>> {
+        let hcall_no = hcall_no.0;
+
+        println!("output on magic port: {:#08X}", hcall_no);
+        let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
+
+        match hcall_no {
+            0x0 => {
+                regs.rax = 0;
+            }
+            0x1 | 0x2 | 0x3 | 0x4 => {
+                let hcall = match hcall_no {
+                    0x1 => VcpuHcall::Open {
+                        pathname: GuestAddress(a1),
+                        flags: a2,
+                        mode: a3,
+                    },
+                    0x2 => VcpuHcall::Read {
+                        fd: a1,
+                        buf: GuestAddress(a2),
+                        count: a3,
+                    },
+                    0x3 => VcpuHcall::Write {
+                        fd: a1,
+                        buf: GuestAddress(a2),
+                        count: a3,
+                    },
+                    0x4 => VcpuHcall::Close { fd: a1 },
+                    _ => unreachable!(),
+                };
+                return Ok(Some(hcall));
+            }
+            _ => {
+                regs.rax = std::u64::MAX;
+                println!("unknown hypercall {:08X}", hcall_no);
+            }
+        };
+        self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        Ok(None)
+    }
+
+    pub fn deliver_hret(&mut self, retval: VcpuHret) -> Result<()> {
+        let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+        regs.rax = retval.0;
+        self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        Ok(())
     }
 }
 
