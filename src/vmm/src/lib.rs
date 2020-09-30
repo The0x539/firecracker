@@ -493,6 +493,42 @@ impl Vmm {
             .set_kvm_memory_regions(&self.guest_memory, enable)
             .map_err(Error::Vm)
     }
+
+    /// Iterates over each core, receiving its pending hcalls and fulfilling them.
+    pub fn handle_hcalls(&mut self) {
+        use vstate::vcpu::{VcpuHcall, VcpuHret};
+        for handle in &self.vcpus_handles {
+            for hcall in handle.iter_hcalls() {
+                const ERR: VcpuHret = VcpuHret(u64::MAX);
+
+                #[allow(unused_variables)]
+                let retval = match hcall {
+                    VcpuHcall::Open {
+                        pathname,
+                        flags,
+                        mode,
+                    } => {
+                        // TODO
+                        ERR
+                    }
+                    VcpuHcall::Read { fd, buf, count } => {
+                        // TODO
+                        ERR
+                    }
+                    VcpuHcall::Write { fd, buf, count } => {
+                        // TODO
+                        ERR
+                    }
+                    VcpuHcall::Close { fd } => {
+                        // TODO
+                        ERR
+                    }
+                };
+
+                handle.send_hret(retval);
+            }
+        }
+    }
 }
 
 impl Subscriber for Vmm {

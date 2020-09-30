@@ -619,6 +619,16 @@ impl VcpuHandle {
     pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
         &self.response_receiver
     }
+
+    pub fn iter_hcalls(&self) -> impl Iterator<Item = VcpuHcall> + '_ {
+        self.hcall_receiver.try_iter()
+    }
+
+    pub fn send_hret(&self, retval: VcpuHret) {
+        self.hret_sender
+            .send(retval)
+            .expect("Couldn't send hret to vcpu thread");
+    }
 }
 
 #[derive(PartialEq, Eq)]

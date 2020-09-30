@@ -246,7 +246,7 @@ fn main() {
             boot_timer_enabled,
         );
     } else {
-        run_without_api(
+        run_custom(
             seccomp_filter,
             vmm_config_json,
             &instance_info,
@@ -285,6 +285,7 @@ fn build_microvm_from_json(
     (vm_resources, vmm)
 }
 
+#[allow(dead_code)]
 fn run_without_api(
     seccomp_filter: BpfProgram,
     config_json: Option<String>,
@@ -322,5 +323,27 @@ fn run_without_api(
         event_manager
             .run()
             .expect("Failed to start the event manager");
+    }
+}
+
+fn run_custom(
+    seccomp_filter: BpfProgram,
+    config_json: Option<String>,
+    instance_info: &InstanceInfo,
+    boot_timer_enabled: bool,
+) {
+    let mut event_manager = EventManager::new().unwrap();
+
+    let (_resources, vmm) = build_microvm_from_json(
+        seccomp_filter,
+        &mut event_manager,
+        config_json.unwrap(),
+        instance_info,
+        boot_timer_enabled,
+    );
+
+    loop {
+        event_manager.run_with_timeout(100).unwrap();
+        vmm.lock().unwrap().handle_hcalls();
     }
 }

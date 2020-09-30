@@ -141,7 +141,7 @@ type Result<T> = result::Result<T, Error>;
 
 #[derive(PartialEq, Eq)]
 pub struct VcpuHcallId(u32);
-pub struct VcpuHret(u64);
+pub struct VcpuHret(pub(crate) u64);
 pub enum VcpuHcall {
     Open {
         pathname: GuestAddress,
