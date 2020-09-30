@@ -15,6 +15,7 @@ use crate::vstate::{
     vcpu::{VcpuConfig, VcpuEmulation},
     vm::Vm,
 };
+use byteorder::{ByteOrder, NativeEndian};
 use cpuid::{c3, filter_cpuid, t2, VmSpec};
 use kvm_bindings::{
     kvm_debugregs, kvm_lapic_state, kvm_mp_state, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs,
@@ -138,6 +139,28 @@ impl Display for Error {
 
 type Result<T> = result::Result<T, Error>;
 
+pub struct VcpuHret(pub(super) u64);
+pub enum VcpuHcall {
+    Open {
+        pathname: GuestAddress,
+        flags: u64,
+        mode: u64,
+    },
+    Read {
+        fd: u64,
+        buf: GuestAddress,
+        count: u64,
+    },
+    Write {
+        fd: u64,
+        buf: GuestAddress,
+        count: u64,
+    },
+    Close {
+        fd: u64,
+    },
+}
+
 /// A wrapper around creating and using a kvm x86_64 vcpu.
 pub struct KvmVcpu {
     pub index: u8,
@@ -156,6 +179,8 @@ impl KvmVcpu {
     ///
     /// * `id` - Represents the CPU number between [0, max vcpus).
     /// * `vm` - The vm to which this vcpu will get attached.
+    /// * `hcall_sender` - A channel for sending host delegation requests.
+    /// * `hret_receiver` - A channel for receiving host delegation return values.
     pub fn new(index: u8, vm: &Vm) -> Result<Self> {
         let kvm_vcpu = vm.fd().create_vcpu(index).map_err(Error::VcpuFd)?;
 
@@ -348,6 +373,16 @@ impl KvmVcpu {
     pub fn run_arch_emulation(&self, exit: VcpuExit) -> super::Result<VcpuEmulation> {
         match exit {
             VcpuExit::IoIn(addr, data) => {
+                match addr {
+                    0x7C4 => {
+                        let hcall_no = NativeEndian::read_u32(data);
+                        return Ok(VcpuEmulation::Hcall(hcall_no));
+                    }
+                    0xC0C0 => {
+                        print!("{}", data[0] as char);
+                    }
+                    _ => (),
+                }
                 if let Some(pio_bus) = &self.pio_bus {
                     pio_bus.read(u64::from(addr), data);
                     METRICS.vcpu.exit_io_in.inc();

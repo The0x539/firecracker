@@ -26,6 +26,7 @@ rate_limiter = { path = "../rate_limiter" }
 seccomp = { path = "../seccomp" }
 snapshot = { path = "../snapshot"}
 utils = { path = "../utils" }
+byteorder = "1.3.4"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 cpuid = { path = "../cpuid" }
