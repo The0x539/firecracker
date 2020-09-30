@@ -49,7 +49,7 @@ use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 #[cfg(target_arch = "x86_64")]
 use crate::vstate::vcpu::VcpuState;
 use crate::vstate::{
-    vcpu::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse},
+    vcpu::{StdioHcallId, Vcpu, VcpuEvent, VcpuHandle, VcpuHcall, VcpuHret, VcpuResponse},
     vm::Vm,
 };
 use arch::DeviceType;
@@ -61,7 +61,7 @@ use seccomp::BpfProgramRef;
 use snapshot::Persist;
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
-use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -496,36 +496,70 @@ impl Vmm {
 
     /// Iterates over each core, receiving its pending hcalls and fulfilling them.
     pub fn handle_hcalls(&mut self) {
-        use vstate::vcpu::{VcpuHcall, VcpuHret};
         for handle in &self.vcpus_handles {
             for hcall in handle.iter_hcalls() {
-                const ERR: VcpuHret = VcpuHret(u64::MAX);
-
-                #[allow(unused_variables)]
                 let retval = match hcall {
-                    VcpuHcall::Open {
-                        pathname,
-                        flags,
-                        mode,
-                    } => {
-                        // TODO
-                        ERR
-                    }
-                    VcpuHcall::Read { fd, buf, count } => {
-                        // TODO
-                        ERR
-                    }
-                    VcpuHcall::Write { fd, buf, count } => {
-                        // TODO
-                        ERR
-                    }
-                    VcpuHcall::Close { fd } => {
-                        // TODO
-                        ERR
+                    VcpuHcall::Stdio { id, args } => {
+                        #[repr(C)]
+                        struct HcallArgs(usize, usize, usize);
+
+                        let args_ptr = self
+                            .guest_memory
+                            .get_host_address(args)
+                            .expect("Invalid guest address for stdio hcall args")
+                            .cast::<HcallArgs>();
+
+                        assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
+                        let args = unsafe {
+                            args_ptr
+                                .as_ref()
+                                .expect("Invalid host address for stdio hcall args")
+                        };
+
+                        match id {
+                            StdioHcallId::Open => {
+                                let pathname = self
+                                    .guest_memory
+                                    .get_host_address(GuestAddress(args.0 as u64))
+                                    .expect("Invalid guest address for pathname")
+                                    .cast::<i8>();
+
+                                let flags = args.1 as i32;
+                                let mode = args.2 as i32;
+
+                                unsafe { libc::open(pathname, flags, mode) as u64 }
+                            }
+
+                            StdioHcallId::Read | StdioHcallId::Write => {
+                                let buf = self
+                                    .guest_memory
+                                    .get_host_address(GuestAddress(args.1 as u64))
+                                    .expect("Invalid guest address for buffer")
+                                    .cast::<libc::c_void>();
+
+                                let fd = args.0 as i32;
+                                let count = args.2 as usize;
+
+                                match id {
+                                    StdioHcallId::Read => unsafe {
+                                        libc::read(fd, buf, count) as u64
+                                    },
+                                    StdioHcallId::Write => unsafe {
+                                        libc::write(fd, buf, count) as u64
+                                    },
+                                    _ => unreachable!(),
+                                }
+                            }
+
+                            StdioHcallId::Close => {
+                                let fd = args.0 as i32;
+                                unsafe { libc::close(fd) as u64 }
+                            }
+                        }
                     }
                 };
 
-                handle.send_hret(retval);
+                handle.send_hret(VcpuHret(retval));
             }
         }
     }

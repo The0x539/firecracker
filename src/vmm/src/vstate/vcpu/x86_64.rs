@@ -6,6 +6,7 @@
 // found in the THIRD-PARTY file.
 
 use std::{
+    convert::TryFrom,
     fmt::{Display, Formatter},
     result,
 };
@@ -23,6 +24,7 @@ use kvm_bindings::{
 };
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use logger::{error, Metric, METRICS};
+use num_enum::TryFromPrimitive;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_memory::{Address, GuestAddress, GuestMemoryMmap};
@@ -143,24 +145,18 @@ type Result<T> = result::Result<T, Error>;
 pub struct VcpuHcallId(u32);
 pub struct VcpuHret(pub(crate) u64);
 pub enum VcpuHcall {
-    Open {
-        pathname: GuestAddress,
-        flags: u64,
-        mode: u64,
+    Stdio {
+        id: StdioHcallId,
+        args: GuestAddress,
     },
-    Read {
-        fd: u64,
-        buf: GuestAddress,
-        count: u64,
-    },
-    Write {
-        fd: u64,
-        buf: GuestAddress,
-        count: u64,
-    },
-    Close {
-        fd: u64,
-    },
+}
+#[repr(u32)]
+#[derive(TryFromPrimitive)]
+pub enum StdioHcallId {
+    Open = 1,
+    Read = 2,
+    Write = 3,
+    Close = 4,
 }
 
 /// A wrapper around creating and using a kvm x86_64 vcpu.
@@ -416,40 +412,22 @@ impl KvmVcpu {
 
         println!("output on magic port: {:#08X}", hcall_no);
         let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
-        let (a1, a2, a3) = (regs.rcx, regs.rdx, regs.rsi);
 
-        match hcall_no {
-            0x0 => {
-                regs.rax = 0;
-            }
-            0x1 | 0x2 | 0x3 | 0x4 => {
-                let hcall = match hcall_no {
-                    0x1 => VcpuHcall::Open {
-                        pathname: GuestAddress(a1),
-                        flags: a2,
-                        mode: a3,
-                    },
-                    0x2 => VcpuHcall::Read {
-                        fd: a1,
-                        buf: GuestAddress(a2),
-                        count: a3,
-                    },
-                    0x3 => VcpuHcall::Write {
-                        fd: a1,
-                        buf: GuestAddress(a2),
-                        count: a3,
-                    },
-                    0x4 => VcpuHcall::Close { fd: a1 },
-                    _ => unreachable!(),
-                };
-                return Ok(Some(hcall));
-            }
-            _ => {
-                regs.rax = std::u64::MAX;
-                println!("unknown hypercall {:08X}", hcall_no);
-            }
-        };
-        self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        if let Ok(id) = StdioHcallId::try_from(hcall_no) {
+            let hcall = VcpuHcall::Stdio {
+                id,
+                args: GuestAddress(regs.r8),
+            };
+            return Ok(Some(hcall));
+        } else if hcall_no == 0 {
+            regs.rax = 0;
+            self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        } else {
+            println!("Unknown hypercall {:08x}", hcall_no);
+            regs.rax = u64::MAX;
+            self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+        }
+
         Ok(None)
     }
 
