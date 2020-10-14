@@ -371,6 +371,13 @@ impl KvmVcpu {
     pub fn run_arch_emulation(&self, exit: VcpuExit) -> super::Result<VcpuEmulation> {
         match exit {
             VcpuExit::IoIn(addr, data) => {
+                if let Some(pio_bus) = &self.pio_bus {
+                    pio_bus.read(u64::from(addr), data);
+                    METRICS.vcpu.exit_io_in.inc();
+                }
+                Ok(VcpuEmulation::Handled)
+            }
+            VcpuExit::IoOut(addr, data) => {
                 match addr {
                     0x7C4 => {
                         let hcall_no = NativeEndian::read_u32(data);
@@ -381,13 +388,6 @@ impl KvmVcpu {
                     }
                     _ => (),
                 }
-                if let Some(pio_bus) = &self.pio_bus {
-                    pio_bus.read(u64::from(addr), data);
-                    METRICS.vcpu.exit_io_in.inc();
-                }
-                Ok(VcpuEmulation::Handled)
-            }
-            VcpuExit::IoOut(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
                     pio_bus.write(u64::from(addr), data);
                     METRICS.vcpu.exit_io_out.inc();
@@ -433,7 +433,7 @@ impl KvmVcpu {
 
     pub fn deliver_hret(&mut self, retval: VcpuHret) -> Result<()> {
         let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
-        regs.rax = retval.0;
+        regs.r8 = retval.0;
         self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
         Ok(())
     }
