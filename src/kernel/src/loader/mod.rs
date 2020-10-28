@@ -13,6 +13,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 
 use super::cmdline::Error as CmdlineError;
+use multiboot2_host::header as mb2_hdr;
 use utils::structs::read_struct;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
@@ -34,6 +35,7 @@ pub enum Error {
     SeekKernelStart,
     SeekKernelImage,
     SeekProgramHeader,
+    MissingMultiboot2Tag,
 }
 
 impl fmt::Display for Error {
@@ -55,12 +57,130 @@ impl fmt::Display for Error {
                 }
                 Error::SeekKernelImage => "Failed to seek to offset of kernel image",
                 Error::SeekProgramHeader => "Failed to seek to ELF program header",
+                Error::MissingMultiboot2Tag => "Kernel's Multiboot2 header lacks an expected tag",
             }
         )
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub fn load_kernel<F>(
+    guest_mem: &GuestMemoryMmap,
+    mut kernel_image: &mut F, // not sure about accepting &mut here
+    start_address: u64,
+) -> Result<GuestAddress>
+where
+    F: Read + Seek,
+{
+    #[cfg(target_arch = "x86")]
+    return load_elf_kernel(guest_mem, kernel_image, start_address);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let header = mb2_hdr::find_header(&mut kernel_image)
+            .map_err(|_| Error::ReadKernelDataStruct("Failed to search for Multiboot2 header"))?;
+
+        if let Some((offset, _hdr)) = header {
+            // TODO: use the offset we just found
+            load_mb2_kernel(guest_mem, kernel_image, offset)
+        } else {
+            load_elf_kernel(guest_mem, kernel_image, start_address)
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn load_mb2_kernel<F>(
+    guest_mem: &GuestMemoryMmap,
+    mut kernel_image: &mut F,
+    mb2_location: u64,
+) -> Result<GuestAddress>
+where
+    F: Read + Seek,
+{
+    let mut load_addrs = None;
+    let mut entry_addr = None;
+    let mut hrt_tag = None;
+
+    let iter = mb2_hdr::TagIter::new(&mut kernel_image);
+
+    for tag in iter {
+        use mb2_hdr::Tag;
+        let tag = tag.map_err(|_| Error::ReadKernelDataStruct("Failed to read Multiboot2 tags"))?;
+        match tag {
+            Tag::End => break,
+
+            Tag::LoadAddr {
+                header_addr,
+                load_addr,
+                load_end_addr,
+                bss_end_addr,
+            } => {
+                load_addrs = Some((
+                    header_addr as u64,
+                    load_addr as u64,
+                    load_end_addr as u64,
+                    bss_end_addr as u64,
+                ));
+            }
+
+            Tag::EntryAddr(addr) => {
+                entry_addr = entry_addr.or(Some(GuestAddress(addr as u64)));
+            }
+
+            Tag::HybridRuntime {
+                flags,
+                gpa_map_req: _,
+                hrt_hihalf_offset,
+                nautilus_entry_gva,
+                comm_page_gpa: _,
+                int_vec: _,
+            } => {
+                if nautilus_entry_gva != 0 {
+                    entry_addr = entry_addr.or(Some(GuestAddress(nautilus_entry_gva)));
+                }
+                hrt_tag = Some((flags, hrt_hihalf_offset))
+            }
+
+            _ => {
+                return Err(Error::ReadKernelDataStruct(
+                    "Unsupported Multiboot2 header tag",
+                ))
+            }
+        }
+    }
+
+    let (header_addr, load_addr, load_end_addr, bss_end_addr) =
+        load_addrs.ok_or(Error::MissingMultiboot2Tag)?;
+    let entry_addr = entry_addr.ok_or(Error::MissingMultiboot2Tag)?;
+    let _hrt_tag = hrt_tag.ok_or(Error::MissingMultiboot2Tag)?;
+
+    // behold, the trifecta of 64-bit unsigned integers
+    let src_addr: u64 = load_addr - (header_addr - mb2_location);
+    let dest_addr: GuestAddress = GuestAddress(load_addr);
+    let read_len: usize = (load_end_addr - load_addr) as usize;
+
+    kernel_image
+        .seek(SeekFrom::Start(src_addr))
+        .map_err(|_| Error::SeekKernelStart)?;
+
+    guest_mem
+        .read_exact_from(dest_addr, kernel_image, read_len)
+        .map_err(|_| Error::ReadKernelImage)?;
+
+    let bss_addr = GuestAddress(load_end_addr);
+    let bss_len = (bss_end_addr - load_end_addr) as usize;
+
+    // possibly unnecessary in the context of a VM
+    // TODO: see if we can get away with not doing this to improve boot times
+    guest_mem
+        .read_exact_from(bss_addr, &mut std::io::repeat(0), bss_len)
+        .map_err(|_| Error::ReadKernelImage)?;
+
+    Ok(entry_addr)
+}
 
 /// Loads a kernel from a vmlinux elf image to a slice
 ///
@@ -72,7 +192,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Returns the entry address of the kernel.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub fn load_kernel<F>(
+fn load_elf_kernel<F>(
     guest_mem: &GuestMemoryMmap,
     kernel_image: &mut F,
     start_address: u64,
