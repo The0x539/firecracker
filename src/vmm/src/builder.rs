@@ -295,6 +295,9 @@ pub fn build_microvm_for_boot(
     )?;
     let vcpu_config = vm_resources.vcpu_config();
     let track_dirty_pages = vm_resources.track_dirty_pages();
+    #[cfg(target_arch = "x86_64")]
+    let (entry_addr, hrt_tag) = load_kernel(boot_config, &guest_memory)?;
+    #[cfg(not(target_arch = "x86_64"))]
     let entry_addr = load_kernel(boot_config, &guest_memory)?;
     let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
     // Clone the command-line so that a failed boot doesn't pollute the original.
@@ -341,6 +344,8 @@ pub fn build_microvm_for_boot(
         entry_addr,
         &initrd,
         boot_cmdline,
+        #[cfg(target_arch = "x86_64")]
+        hrt_tag,
     )?;
 
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
@@ -443,17 +448,14 @@ pub fn create_guest_memory(
 fn load_kernel(
     boot_config: &BootConfig,
     guest_memory: &GuestMemoryMmap,
-) -> std::result::Result<GuestAddress, StartMicrovmError> {
+) -> std::result::Result<(GuestAddress, Option<(u64, u64)>), StartMicrovmError> {
     let mut kernel_file = boot_config
         .kernel_file
         .try_clone()
         .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
 
-    let entry_addr =
-        kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
-            .map_err(StartMicrovmError::KernelLoader)?;
-
-    Ok(entry_addr)
+    kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
+        .map_err(StartMicrovmError::KernelLoader)
 }
 
 fn load_initrd_from_config(
@@ -629,6 +631,7 @@ pub fn configure_system_for_boot(
     entry_addr: GuestAddress,
     initrd: &Option<InitrdConfig>,
     boot_cmdline: KernelCmdline,
+    #[cfg(target_arch = "x86_64")] hrt_tag: Option<(u64, u64)>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
     #[cfg(target_arch = "x86_64")]
@@ -640,6 +643,7 @@ pub fn configure_system_for_boot(
                     entry_addr,
                     &vcpu_config,
                     vmm.vm.supported_cpuid().clone(),
+                    hrt_tag,
                 )
                 .map_err(Error::VcpuConfigure)
                 .map_err(Internal)?;
@@ -659,6 +663,7 @@ pub fn configure_system_for_boot(
             boot_cmdline.len() + 1,
             initrd,
             vcpus.len() as u8,
+            hrt_tag,
         )
         .map_err(ConfigureSystem)?;
     }

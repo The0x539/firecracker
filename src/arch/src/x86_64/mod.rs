@@ -101,7 +101,24 @@ pub fn initrd_load_addr(guest_mem: &GuestMemoryMmap, initrd_size: usize) -> supe
 /// * `cmdline_size` - Size of the kernel command line in bytes including the null terminator.
 /// * `initrd` - Information about where the ramdisk image was loaded in the `guest_mem`.
 /// * `num_cpus` - Number of virtual CPUs the guest will have.
+/// * `hrt_tag` - Information specific to loading hybrid runtime images, if present.
 pub fn configure_system(
+    guest_mem: &GuestMemoryMmap,
+    cmdline_addr: GuestAddress,
+    cmdline_size: usize,
+    initrd: &Option<InitrdConfig>,
+    num_cpus: u8,
+    hrt_tag: Option<(u64, u64)>,
+) -> super::Result<()> {
+    if let Some((hrt_flags, hrt_hihalf_offset)) = hrt_tag {
+        let _ = (hrt_flags, hrt_hihalf_offset);
+        todo!()
+    } else {
+        configure_linux_system(guest_mem, cmdline_addr, cmdline_size, initrd, num_cpus)
+    }
+}
+
+fn configure_linux_system(
     guest_mem: &GuestMemoryMmap,
     cmdline_addr: GuestAddress,
     cmdline_size: usize,

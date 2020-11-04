@@ -70,12 +70,15 @@ pub fn load_kernel<F>(
     guest_mem: &GuestMemoryMmap,
     mut kernel_image: &mut F, // not sure about accepting &mut here
     start_address: u64,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, Option<(u64, u64)>)>
 where
     F: Read + Seek,
 {
     #[cfg(target_arch = "x86")]
-    return load_elf_kernel(guest_mem, kernel_image, start_address);
+    {
+        let entry_addr = load_elf_kernel(guest_mem, kernel_image, start_address)?;
+        Ok((entry_addr, None))
+    }
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -84,9 +87,11 @@ where
 
         if let Some((offset, _hdr)) = header {
             // TODO: use the offset we just found
-            load_mb2_kernel(guest_mem, kernel_image, offset)
+            let (entry_addr, hrt_tag) = load_mb2_kernel(guest_mem, kernel_image, offset)?;
+            Ok((entry_addr, Some(hrt_tag)))
         } else {
-            load_elf_kernel(guest_mem, kernel_image, start_address)
+            let entry_addr = load_elf_kernel(guest_mem, kernel_image, start_address)?;
+            Ok((entry_addr, None))
         }
     }
 }
@@ -96,7 +101,7 @@ fn load_mb2_kernel<F>(
     guest_mem: &GuestMemoryMmap,
     mut kernel_image: &mut F,
     mb2_location: u64,
-) -> Result<GuestAddress>
+) -> Result<(GuestAddress, (u64, u64))>
 where
     F: Read + Seek,
 {
@@ -155,7 +160,7 @@ where
     let (header_addr, load_addr, load_end_addr, bss_end_addr) =
         load_addrs.ok_or(Error::MissingMultiboot2Tag)?;
     let entry_addr = entry_addr.ok_or(Error::MissingMultiboot2Tag)?;
-    let _hrt_tag = hrt_tag.ok_or(Error::MissingMultiboot2Tag)?;
+    let hrt_tag = hrt_tag.ok_or(Error::MissingMultiboot2Tag)?;
 
     // behold, the trifecta of 64-bit unsigned integers
     let src_addr: u64 = load_addr - (header_addr - mb2_location);
@@ -179,7 +184,7 @@ where
         .read_exact_from(bss_addr, &mut std::io::repeat(0), bss_len)
         .map_err(|_| Error::ReadKernelImage)?;
 
-    Ok(entry_addr)
+    Ok((entry_addr, hrt_tag))
 }
 
 /// Loads a kernel from a vmlinux elf image to a slice

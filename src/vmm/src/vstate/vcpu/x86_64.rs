@@ -205,6 +205,7 @@ impl KvmVcpu {
         kernel_start_addr: GuestAddress,
         vcpu_config: &VcpuConfig,
         mut cpuid: CpuId,
+        hrt_tag: Option<(u64, u64)>,
     ) -> Result<()> {
         let cpuid_vm_spec = VmSpec::new(self.index, vcpu_config.vcpu_count, vcpu_config.ht_enabled)
             .map_err(Error::CpuId)?;
@@ -232,10 +233,11 @@ impl KvmVcpu {
         self.fd.set_cpuid2(&cpuid).map_err(Error::VcpuSetCpuid)?;
 
         arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
-        arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value() as u64)
+        arch::x86_64::regs::setup_regs(&self.fd, kernel_start_addr.raw_value() as u64, hrt_tag)
             .map_err(Error::REGSConfiguration)?;
         arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
-        arch::x86_64::regs::setup_sregs(guest_mem, &self.fd).map_err(Error::SREGSConfiguration)?;
+        arch::x86_64::regs::setup_sregs(guest_mem, &self.fd, hrt_tag)
+            .map_err(Error::SREGSConfiguration)?;
         arch::x86_64::interrupts::set_lint(&self.fd).map_err(Error::LocalIntConfiguration)?;
         Ok(())
     }
