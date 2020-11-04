@@ -313,18 +313,7 @@ fn compute_idmap_pts(mem: &GuestMemoryMmap) -> [u64; 4] {
     ]
 }
 
-fn compute_idmap_num_pts(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
-    let [l1, l2, l3, l4] = compute_idmap_pts(mem);
-    match level {
-        PagingLevel::Colossal => l1,
-        PagingLevel::Huge => l1 + l2,
-        PagingLevel::Large => l1 + l2 + l3,
-        PagingLevel::Normal => l1 + l2 + l3 + l4,
-    }
-}
-
-fn compute_idmap_base_addr(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
-    let num_pt = compute_idmap_num_pts(mem, level);
+fn compute_idmap_base_addr(mem: &GuestMemoryMmap, num_pt: u64) -> u64 {
     let last_addr = mem.last_addr().0;
     let last_page = (last_addr >> 12) << 12;
     last_page - (4 /* gdt/idt/whatever */ + num_pt) * PAGE_SIZE
@@ -353,10 +342,18 @@ fn nk_setup_page_tables(
         PagingLevel::Large
     };
 
-    let [num_l1, num_l2, num_l3, num_l4] = compute_idmap_pts(mem);
-    let num_pts = compute_idmap_num_pts(mem, paging_level);
+    let (num_l1, num_l2, num_l3, num_l4) = {
+        let [l1, l2, l3, l4] = compute_idmap_pts(mem);
+        match paging_level {
+            PagingLevel::Colossal => (l1, 0, 0, 0),
+            PagingLevel::Huge => (l1, l2, 0, 0),
+            PagingLevel::Large => (l1, l2, l3, 0),
+            PagingLevel::Normal => (l1, l2, l3, l4),
+        }
+    };
+    let num_pts = num_l1 + num_l2 + num_l3 + num_l4;
 
-    let l1_start = compute_idmap_base_addr(mem, paging_level);
+    let l1_start = compute_idmap_base_addr(mem, num_pts);
     let l2_start = l1_start + PAGE_SIZE * num_l1;
     let l3_start = l2_start + PAGE_SIZE * num_l2;
     let l4_start = l3_start + PAGE_SIZE * num_l3;
@@ -398,14 +395,6 @@ fn nk_setup_page_tables(
         }
     }
 
-    if paging_level == PagingLevel::Colossal {
-        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
-        mem.write_slice(data, GuestAddress(l1_start))
-            .map_err(|_| Error::WritePML4Address)?;
-        sregs.cr3 = l1_start;
-        return Ok(());
-    }
-
     for i in 0..num_l2 {
         let pdp = page!(pml4::PDPe, num_l1 + i);
 
@@ -434,14 +423,6 @@ fn nk_setup_page_tables(
         }
     }
 
-    if paging_level == PagingLevel::Huge {
-        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
-        mem.write_slice(data, GuestAddress(l1_start))
-            .map_err(|_| Error::WritePML4Address)?;
-        sregs.cr3 = l1_start;
-        return Ok(());
-    }
-
     for i in 0..num_l3 {
         let pd = page!(pml4::PDe, num_l1 + num_l2 + i);
 
@@ -467,14 +448,6 @@ fn nk_setup_page_tables(
             };
             entry.set_pt_base_addr(addr >> 12);
         }
-    }
-
-    if paging_level == PagingLevel::Large {
-        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
-        mem.write_slice(data, GuestAddress(l1_start))
-            .map_err(|_| Error::WritePML4Address)?;
-        sregs.cr3 = l1_start;
-        return Ok(());
     }
 
     for i in 0..num_l4 {
