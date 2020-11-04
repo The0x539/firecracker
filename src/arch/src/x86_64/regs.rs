@@ -8,6 +8,7 @@
 use std::mem;
 
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
+use super::pml4::{self, PagingLevel};
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs};
 use kvm_ioctls::VcpuFd;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
@@ -16,6 +17,13 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 const PML4_START: u64 = 0x9000;
 const PDPTE_START: u64 = 0xa000;
 const PDE_START: u64 = 0xb000;
+
+// Consts used for nautilus stuff
+const PAGE_SIZE: u64 = 4096;
+const L4_UNIT: u64 = PAGE_SIZE; // 4 KiB
+const L3_UNIT: u64 = 512 * L4_UNIT; // 2 MiB
+const L2_UNIT: u64 = 512 * L3_UNIT; // 1 GiB
+const L1_UNIT: u64 = 512 * L2_UNIT; // 512 GiB
 
 /// Errors thrown while setting up x86_64 registers.
 #[derive(Debug)]
@@ -32,6 +40,8 @@ pub enum Error {
     WriteGDT,
     /// Writing the IDT to RAM failed.
     WriteIDT,
+    /// Writing PTE to RAM failed.
+    WritePTEAddress,
     /// Writing PDPTE to RAM failed.
     WritePDPTEAddress,
     /// Writing PDE to RAM failed.
@@ -64,20 +74,33 @@ pub fn setup_fpu(vcpu: &VcpuFd) -> Result<()> {
 /// * `boot_ip` - Starting instruction pointer.
 /// * `hrt_tag` - Information specific to setting up a HRT/MB2 system, if present.
 pub fn setup_regs(vcpu: &VcpuFd, boot_ip: u64, hrt_tag: Option<(u64, u64)>) -> Result<()> {
-    let _ = hrt_tag;
-    let regs: kvm_regs = kvm_regs {
-        rflags: 0x0000_0000_0000_0002u64,
-        rip: boot_ip,
-        // Frame pointer. It gets a snapshot of the stack pointer (rsp) so that when adjustments are
-        // made to rsp (i.e. reserving space for local variables or pushing values on to the stack),
-        // local variables and function parameters are still accessible from a constant offset from rbp.
-        rsp: super::layout::BOOT_STACK_POINTER as u64,
-        // Starting stack pointer.
-        rbp: super::layout::BOOT_STACK_POINTER as u64,
-        // Must point to zero page address per Linux ABI. This is x86_64 specific.
-        rsi: super::layout::ZERO_PAGE_START as u64,
-        ..Default::default()
-    };
+    let regs;
+
+    if let Some((_flags, gva_offset)) = hrt_tag {
+        regs = kvm_regs {
+            rflags: 0x0000_0000_0000_0002u64,
+            rip: boot_ip,
+            rax: 0x36D76289,
+            rbx: super::layout::ZERO_PAGE_START,
+            rsp: 0x1000_4000 + gva_offset,
+            rbp: 0x1000_4000 + gva_offset,
+            ..Default::default()
+        };
+    } else {
+        regs = kvm_regs {
+            rflags: 0x0000_0000_0000_0002u64,
+            rip: boot_ip,
+            // Frame pointer. It gets a snapshot of the stack pointer (rsp) so that when adjustments are
+            // made to rsp (i.e. reserving space for local variables or pushing values on to the stack),
+            // local variables and function parameters are still accessible from a constant offset from rbp.
+            rsp: super::layout::BOOT_STACK_POINTER as u64,
+            // Starting stack pointer.
+            rbp: super::layout::BOOT_STACK_POINTER as u64,
+            // Must point to zero page address per Linux ABI. This is x86_64 specific.
+            rsi: super::layout::ZERO_PAGE_START as u64,
+            ..Default::default()
+        };
+    }
 
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
@@ -94,11 +117,15 @@ pub fn setup_sregs(
     vcpu: &VcpuFd,
     hrt_tag: Option<(u64, u64)>,
 ) -> Result<()> {
-    let _ = hrt_tag;
     let mut sregs: kvm_sregs = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
 
-    configure_segments_and_sregs(mem, &mut sregs)?;
-    setup_page_tables(mem, &mut sregs)?; // TODO(dgreid) - Can this be done once per system instead?
+    if let Some((flags, offset)) = hrt_tag {
+        nk_configure_segments_and_sregs(mem, &mut sregs, offset)?;
+        nk_setup_page_tables(mem, &mut sregs, flags, offset)?;
+    } else {
+        linux_configure_segments_and_sregs(mem, &mut sregs)?;
+        linux_setup_page_tables(mem, &mut sregs)?; // TODO(dgreid) - Can this be done once per system instead?
+    }
 
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
@@ -115,17 +142,25 @@ const X86_CR0_PE: u64 = 0x1;
 const X86_CR0_PG: u64 = 0x8000_0000;
 const X86_CR4_PAE: u64 = 0x20;
 
-fn write_gdt_table(table: &[u64], guest_mem: &GuestMemoryMmap) -> Result<()> {
-    let boot_gdt_addr = GuestAddress(BOOT_GDT_OFFSET);
+fn write_gdt_table_at_addr(
+    table: &[u64],
+    guest_mem: &GuestMemoryMmap,
+    base_addr: GuestAddress,
+) -> Result<()> {
     for (index, entry) in table.iter().enumerate() {
         let addr = guest_mem
-            .checked_offset(boot_gdt_addr, index * mem::size_of::<u64>())
+            .checked_offset(base_addr, index * mem::size_of::<u64>())
             .ok_or(Error::WriteGDT)?;
         guest_mem
             .write_obj(*entry, addr)
             .map_err(|_| Error::WriteGDT)?;
     }
     Ok(())
+}
+
+fn write_gdt_table(table: &[u64], guest_mem: &GuestMemoryMmap) -> Result<()> {
+    let boot_gdt_addr = GuestAddress(BOOT_GDT_OFFSET);
+    write_gdt_table_at_addr(table, guest_mem, boot_gdt_addr)
 }
 
 fn write_idt_value(val: u64, guest_mem: &GuestMemoryMmap) -> Result<()> {
@@ -135,7 +170,103 @@ fn write_idt_value(val: u64, guest_mem: &GuestMemoryMmap) -> Result<()> {
         .map_err(|_| Error::WriteIDT)
 }
 
-fn configure_segments_and_sregs(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) -> Result<()> {
+fn nk_configure_segments_and_sregs(
+    mem: &GuestMemoryMmap,
+    sregs: &mut kvm_sregs,
+    gva_offset: u64,
+) -> Result<()> {
+    let gdt_table = [
+        gdt_entry(0, 0, 0),
+        gdt_entry(0xa09a, 0, 0xfffff),
+        gdt_entry(0xa092, 0, 0xfffff),
+    ];
+
+    let code_seg = kvm_segment_from_gdt(gdt_table[1], 1);
+    let data_seg = kvm_segment_from_gdt(gdt_table[2], 2);
+
+    let last_addr = mem.last_addr().0 as u64;
+    let last_page = (last_addr >> 12) << 12;
+
+    let gdt_loc = last_page - 3 * PAGE_SIZE;
+    write_gdt_table_at_addr(&gdt_table, mem, GuestAddress(gdt_loc))?;
+    sregs.gdt.base = gdt_loc;
+    sregs.gdt.limit = 24;
+
+    #[rustfmt::skip]
+    let vmx_null_int_handler: [u8; 30] = [
+        // pushq %rax
+        0x50,
+        // pushq %rbx
+        0x53,
+        // pushq %rcx
+        0x51,
+        // movq HVM_HCALL, %rax
+        0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+        // last two words of interrupt stack
+        // movq 24(%rsp), rbx 
+        0x48, 0x8b, 0x5c, 0x24, 0x18,
+        // movq 32(%rsp), rbx 
+        0x48, 0x8b, 0x4c, 0x24, 0x20,
+        // vmmcall
+        0x0f, 0x01, 0xc1,
+        // popq %rcx
+        0x59,
+        // popq %rbx
+        0x5b,
+        // popq %rax
+        0x58,
+        // hlt
+        0xf4,
+        // iretq
+        0x48, 0xcf,
+    ];
+
+    let idt_loc = last_page - 2 * PAGE_SIZE;
+    let null_int_handler_loc = last_page - 1 * PAGE_SIZE;
+
+    mem.write_obj(vmx_null_int_handler, GuestAddress(null_int_handler_loc))
+        .map_err(|_| Error::WriteIDT)?;
+
+    let mut trap_gate = pml4::IDTe::default();
+    trap_gate.set_selector(0x8);
+    trap_gate.set_gate_type(0xf);
+    trap_gate.set_present(true);
+    trap_gate.set_offset(null_int_handler_loc + gva_offset);
+
+    let mut int_gate = pml4::IDTe::default();
+    int_gate.set_selector(0x8);
+    int_gate.set_gate_type(0xe);
+    int_gate.set_present(true);
+    int_gate.set_offset(null_int_handler_loc + gva_offset);
+
+    for i in 0..256 {
+        let entry = if i < 32 { trap_gate } else { int_gate };
+        let addr = GuestAddress(idt_loc + i * 16);
+        mem.write_obj(entry, addr).map_err(|_| Error::WriteIDT)?;
+    }
+
+    sregs.idt.base = idt_loc + gva_offset;
+    sregs.idt.limit = 16 * 256 - 1; // TODO: Should this be 1 larger?
+
+    sregs.cs = code_seg;
+    sregs.ds = data_seg;
+    sregs.es = data_seg;
+    sregs.fs = data_seg;
+    sregs.gs = data_seg;
+    sregs.ss = data_seg;
+
+    sregs.cr0 |= X86_CR0_PE;
+    sregs.cr0 |= X86_CR0_PG;
+
+    sregs.cr4 |= X86_CR4_PAE;
+
+    sregs.efer |= EFER_LME;
+    sregs.efer |= EFER_LMA;
+
+    Ok(())
+}
+
+fn linux_configure_segments_and_sregs(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) -> Result<()> {
     let gdt_table: [u64; BOOT_GDT_MAX as usize] = [
         gdt_entry(0, 0, 0),            // NULL
         gdt_entry(0xa09b, 0, 0xfffff), // CODE
@@ -171,7 +302,196 @@ fn configure_segments_and_sregs(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) ->
     Ok(())
 }
 
-fn setup_page_tables(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) -> Result<()> {
+fn compute_idmap_pts(mem: &GuestMemoryMmap) -> [u64; 4] {
+    let max_gva = mem.last_addr().0 + 1;
+    let ceil_div = |a, b| a / b + (a % b == 0) as u64;
+    [
+        1,
+        ceil_div(ceil_div(max_gva, L2_UNIT), 512),
+        ceil_div(ceil_div(max_gva, L3_UNIT), 512),
+        ceil_div(ceil_div(max_gva, L4_UNIT), 512),
+    ]
+}
+
+fn compute_idmap_base_addr(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
+    let [l1, l2, l3, l4] = compute_idmap_pts(mem);
+    let num_pt = match level {
+        PagingLevel::Colossal => l1,
+        PagingLevel::Huge => l1 + l2,
+        PagingLevel::Large => l1 + l2 + l3,
+        PagingLevel::Normal => l1 + l2 + l3 + l4,
+    };
+    let last_addr = mem.last_addr().0;
+    let last_page = (last_addr >> 12) << 12;
+    last_page - (4 /* gdt/idt/whatever */ + num_pt) * PAGE_SIZE
+}
+
+fn nk_setup_page_tables(
+    mem: &GuestMemoryMmap,
+    sregs: &mut kvm_sregs,
+    hrt_flags: u64,
+    gva_offset: u64,
+) -> Result<()> {
+    let min_gpa = 0;
+    let max_gpa = mem.last_addr().0;
+    let min_gva = gva_offset;
+    let max_gva = min_gva + max_gpa;
+
+    let paging_level = if hrt_flags & 0x800 != 0 {
+        PagingLevel::Colossal
+    } else if hrt_flags & 0x400 != 0 {
+        PagingLevel::Huge
+    } else if hrt_flags & 0x200 != 0 {
+        PagingLevel::Large
+    } else if hrt_flags & 0x100 != 0 {
+        PagingLevel::Normal
+    } else {
+        PagingLevel::Large
+    };
+
+    let [num_l1, num_l2, num_l3, num_l4] = compute_idmap_pts(mem);
+
+    let l1_start = compute_idmap_base_addr(mem, paging_level);
+    let l2_start = l1_start + PAGE_SIZE * num_l1;
+    let l3_start = l2_start + PAGE_SIZE * num_l2;
+    let l4_start = l3_start + PAGE_SIZE * num_l3;
+
+    let pml4_range = match min_gva {
+        0x0000_0000_0000_0000 => 0..num_l2,
+        0xFFFF_8000_0000_0000 => 256..(256 + num_l2),
+        // Other GVA offsets are unsupported.
+        _ => return Err(Error::WritePML4Address),
+    };
+
+    let start = pml4_range.start;
+
+    for i in pml4_range {
+        let j = i - start;
+        let cur_gpa = min_gpa + j * L1_UNIT;
+
+        let mut entry = pml4::PML4e::default();
+        entry.set_present(true);
+        entry.set_writable(true);
+        let addr = if paging_level == PagingLevel::Colossal {
+            cur_gpa
+        } else {
+            l2_start + j * PAGE_SIZE
+        };
+        entry.set_pdp_base_addr(addr >> 12);
+
+        let entry_loc = GuestAddress(l1_start + 8 * i);
+        mem.write_obj(entry.0, entry_loc)
+            .map_err(|_| Error::WritePML4Address)?;
+        if i != j {
+            // write the low half too, why not
+            let entry_loc = GuestAddress(l1_start + 8 * j);
+            mem.write_obj(entry.0, entry_loc)
+                .map_err(|_| Error::WritePML4Address)?;
+        }
+    }
+
+    if paging_level == PagingLevel::Colossal {
+        sregs.cr3 = l1_start;
+        return Ok(());
+    }
+
+    for i in 0..num_l2 {
+        let pdp_gpa = min_gpa + i * L1_UNIT;
+        let pdp_gva = min_gva + i * L1_UNIT;
+
+        for j in 0..512 {
+            let cur_gpa = pdp_gpa + j * L2_UNIT;
+            let cur_gva = pdp_gva + j * L2_UNIT;
+
+            if cur_gva > max_gva {
+                // TODO: does this result in bad uninitialized mem?
+                break;
+            }
+
+            let mut entry = pml4::PDPe::default();
+            entry.set_present(true);
+            entry.set_writable(true);
+            entry.set_1gb(paging_level == PagingLevel::Huge);
+            let addr = if entry.is_1gb() {
+                cur_gpa
+            } else {
+                l3_start + (512 * i + j) * PAGE_SIZE
+            };
+            entry.set_pd_base_addr(addr >> 12);
+
+            let entry_loc = GuestAddress(l2_start + PAGE_SIZE * i + 8 * j);
+            mem.write_obj(entry.0, entry_loc)
+                .map_err(|_| Error::WritePDPTEAddress)?;
+        }
+    }
+
+    if paging_level == PagingLevel::Huge {
+        sregs.cr3 = l1_start;
+        return Ok(());
+    }
+
+    for i in 0..num_l3 {
+        let pd_gpa = min_gpa + i * L2_UNIT;
+        let pd_gva = min_gva + i * L2_UNIT;
+
+        for j in 0..512 {
+            let cur_gpa = pd_gpa + j * L3_UNIT;
+            let cur_gva = pd_gva + j * L3_UNIT;
+
+            if cur_gva > max_gva {
+                break;
+            }
+
+            let mut entry = pml4::PDe::default();
+            entry.set_present(true);
+            entry.set_writable(true);
+            entry.set_2mb(paging_level == PagingLevel::Large);
+            let addr = if entry.is_2mb() {
+                cur_gpa
+            } else {
+                l4_start + (512 * i + j) * PAGE_SIZE
+            };
+            entry.set_pt_base_addr(addr >> 12);
+
+            let entry_loc = GuestAddress(l3_start + PAGE_SIZE * i + 8 * j);
+            mem.write_obj(entry.0, entry_loc)
+                .map_err(|_| Error::WritePDEAddress)?;
+        }
+    }
+
+    if paging_level == PagingLevel::Large {
+        sregs.cr3 = l1_start;
+        return Ok(());
+    }
+
+    for i in 0..num_l4 {
+        let pt_gpa = min_gpa + i * L3_UNIT;
+        let pt_gva = min_gva + i * L3_UNIT;
+
+        for j in 0..512 {
+            let cur_gpa = pt_gpa + j * L4_UNIT;
+            let cur_gva = pt_gva + j * L4_UNIT;
+
+            if cur_gva > max_gva {
+                break;
+            }
+
+            let mut entry = pml4::PTe::default();
+            entry.set_present(true);
+            entry.set_writable(true);
+            entry.set_page_base_addr(cur_gpa >> 12);
+
+            let entry_loc = GuestAddress(l4_start + PAGE_SIZE * i + 8 * j);
+            mem.write_obj(entry.0, entry_loc)
+                .map_err(|_| Error::WritePTEAddress)?;
+        }
+    }
+
+    sregs.cr3 = l1_start;
+    Ok(())
+}
+
+fn linux_setup_page_tables(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) -> Result<()> {
     // Puts PML4 right after zero page but aligned to 4k.
     let boot_pml4_addr = GuestAddress(PML4_START);
     let boot_pdpte_addr = GuestAddress(PDPTE_START);
