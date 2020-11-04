@@ -18,9 +18,15 @@ pub mod regs;
 
 use crate::InitrdConfig;
 use arch_gen::x86::bootparam::{boot_params, E820_RAM};
+use multiboot2_host::bootinfo;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
+    GuestRegionMmap,
 };
+
+#[derive(Debug)]
+enum Void {}
+type DummyResult = Result<(), Void>;
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
 // trait (in this case `ByteValued`) where:
@@ -44,6 +50,8 @@ pub enum Error {
     ZeroPageSetup,
     /// Failed to compute initrd address.
     InitrdAddress,
+    /// Error setting up Multiboot2 bootinfo.
+    Multiboot2Setup,
 }
 
 // Where BIOS/VGA magic would live on a real PC.
@@ -111,11 +119,71 @@ pub fn configure_system(
     hrt_tag: Option<(u64, u64)>,
 ) -> super::Result<()> {
     if let Some((hrt_flags, hrt_hihalf_offset)) = hrt_tag {
-        let _ = (hrt_flags, hrt_hihalf_offset);
-        todo!()
+        configure_mb2_system(guest_mem, num_cpus, hrt_flags, hrt_hihalf_offset)
     } else {
         configure_linux_system(guest_mem, cmdline_addr, cmdline_size, initrd, num_cpus)
     }
+}
+
+fn configure_mb2_system(
+    guest_mem: &GuestMemoryMmap,
+    num_cpus: u8,
+    flags: u64,
+    gva_offset: u64,
+) -> super::Result<()> {
+    let mut regions = Vec::with_capacity(guest_mem.num_regions());
+    let push_region = |_index, region: &GuestRegionMmap| {
+        regions.push(bootinfo::MemMapEntry {
+            base_addr: region.start_addr().0 as u64,
+            length: region.len() as u64,
+            entry_type: 1, // available
+        });
+        DummyResult::Ok(())
+    };
+    guest_mem.with_regions_mut(push_region).unwrap();
+    /* with a sane API, the above could have been:
+    let regions = guest_mem
+        .regions()
+        .map(|region| bootinfo::MemMapEntry { ... })
+        .collect::<Vec<_>>();
+    but whatever */
+
+    let tags = [
+        bootinfo::Tag::HybridRuntime {
+            total_num_apics: num_cpus as u32,
+            first_hrt_apic_id: 0, // TODO: actual HRT setup
+            have_hrt_ioapic: false,
+            first_hrt_ioapic_entry: 0, // ???
+            cpu_freq_khz: 1024,        // TODO: ???
+            hrt_flags: flags,
+            max_mem_mapped: guest_mem.last_addr().0 + 1 as u64, // possibly wrong
+            first_hrt_gpa: 0,
+            boot_state_gpa: 0, // TODO: ???
+            gva_offset,
+            comm_page_gpa: 0,  // TODO: ???
+            hrt_int_vector: 0, // TODO: ???
+        },
+        bootinfo::Tag::BasicMeminfo {
+            mem_lower: 640, // thank you, bill gates
+            mem_upper: ((guest_mem.last_addr().0 + 1 - 1024 * 1024) / 1024) as u32, // possibly wrong
+        },
+        bootinfo::Tag::MemMap { entries: regions },
+        bootinfo::Tag::End,
+    ];
+
+    let mb_addr = GuestAddress(layout::ZERO_PAGE_START);
+    let mb_size = bootinfo::bootinfo_size(&tags[..]) as usize;
+
+    // TODO: find a way to write directly into guest memory?
+    let mut buf = Vec::<u8>::with_capacity(mb_size);
+    bootinfo::write_bootinfo(&tags[..], &mut buf).map_err(|_| Error::Multiboot2Setup)?;
+    assert_eq!(mb_size, buf.len());
+
+    guest_mem
+        .write_slice(&buf, mb_addr)
+        .map_err(|_| Error::Multiboot2Setup)?;
+
+    Ok(())
 }
 
 fn configure_linux_system(
