@@ -368,7 +368,7 @@ fn nk_setup_page_tables(
     let mut buf = vec![[0u64; 512]; num_pts as usize];
     macro_rules! page {
         ($type:ty, $i:expr) => {
-            bytemuck::cast_slice_mut::<u64, $type>(&mut buf[($i) as usize])
+            bytemuck::cast_mut::<[u64; 512], [$type; 512]>(&mut buf[$i as usize])
         };
     }
 
