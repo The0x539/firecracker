@@ -304,7 +304,7 @@ fn linux_configure_segments_and_sregs(mem: &GuestMemoryMmap, sregs: &mut kvm_sre
 
 fn compute_idmap_pts(mem: &GuestMemoryMmap) -> [u64; 4] {
     let max_gva = mem.last_addr().0 + 1;
-    let ceil_div = |a, b| a / b + (a % b == 0) as u64;
+    let ceil_div = |a, b| a / b + (a % b != 0) as u64;
     [
         1,
         ceil_div(ceil_div(max_gva, L2_UNIT), 512),
