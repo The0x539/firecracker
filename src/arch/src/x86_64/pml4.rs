@@ -1,10 +1,12 @@
 #![allow(missing_docs)]
 
 use bitfield::bitfield;
+use bytemuck::{Pod, TransparentWrapper, Zeroable};
 use vm_memory::ByteValued;
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    #[derive(TransparentWrapper, Zeroable, Pod)]
     #[repr(transparent)]
     pub struct PML4e(u64);
     pub present, set_present: 0;
@@ -23,6 +25,7 @@ bitfield! {
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    #[derive(TransparentWrapper, Zeroable, Pod)]
     #[repr(transparent)]
     pub struct PDPe(u64);
     pub present, set_present: 0;
@@ -48,6 +51,7 @@ bitfield! {
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    #[derive(TransparentWrapper, Zeroable, Pod)]
     #[repr(transparent)]
     pub struct PDe(u64);
     pub present, set_present: 0;
@@ -73,6 +77,7 @@ bitfield! {
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    #[derive(TransparentWrapper, Zeroable, Pod)]
     #[repr(transparent)]
     pub struct PTe(u64);
     pub present, set_present: 0;
@@ -92,6 +97,7 @@ bitfield! {
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    #[derive(TransparentWrapper, Zeroable, Pod)]
     #[repr(transparent)]
     pub struct IDTe(u128);
     u64;

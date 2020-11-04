@@ -239,11 +239,11 @@ fn nk_configure_segments_and_sregs(
     int_gate.set_present(true);
     int_gate.set_offset(null_int_handler_loc + gva_offset);
 
-    for i in 0..256 {
-        let entry = if i < 32 { trap_gate } else { int_gate };
-        let addr = GuestAddress(idt_loc + i * 16);
-        mem.write_obj(entry, addr).map_err(|_| Error::WriteIDT)?;
-    }
+    let mut idt = [int_gate; 256];
+    idt[0..32].copy_from_slice(&[trap_gate; 32]);
+
+    mem.write_slice(bytemuck::cast_slice(&idt), GuestAddress(idt_loc))
+        .map_err(|_| Error::WriteIDT)?;
 
     sregs.idt.base = idt_loc + gva_offset;
     sregs.idt.limit = 16 * 256 - 1; // TODO: Should this be 1 larger?
@@ -364,12 +364,13 @@ fn nk_setup_page_tables(
     };
 
     let start = pml4_range.start;
+    let mut pml4 = [pml4::PML4e(0); 512];
 
     for i in pml4_range {
         let j = i - start;
         let cur_gpa = min_gpa + j * L1_UNIT;
 
-        let mut entry = pml4::PML4e::default();
+        let entry = &mut pml4[i as usize];
         entry.set_present(true);
         entry.set_writable(true);
         let addr = if paging_level == PagingLevel::Colossal {
@@ -379,16 +380,14 @@ fn nk_setup_page_tables(
         };
         entry.set_pdp_base_addr(addr >> 12);
 
-        let entry_loc = GuestAddress(l1_start + 8 * i);
-        mem.write_obj(entry.0, entry_loc)
-            .map_err(|_| Error::WritePML4Address)?;
         if i != j {
             // write the low half too, why not
-            let entry_loc = GuestAddress(l1_start + 8 * j);
-            mem.write_obj(entry.0, entry_loc)
-                .map_err(|_| Error::WritePML4Address)?;
+            pml4[j as usize] = *entry;
         }
     }
+
+    mem.write_slice(bytemuck::cast_slice(&pml4), GuestAddress(l1_start))
+        .map_err(|_| Error::WritePML4Address)?;
 
     if paging_level == PagingLevel::Colossal {
         sregs.cr3 = l1_start;
@@ -396,6 +395,8 @@ fn nk_setup_page_tables(
     }
 
     for i in 0..num_l2 {
+        let mut pdp = [pml4::PDPe(0); 512];
+
         let pdp_gpa = min_gpa + i * L1_UNIT;
         let pdp_gva = min_gva + i * L1_UNIT;
 
@@ -408,7 +409,7 @@ fn nk_setup_page_tables(
                 break;
             }
 
-            let mut entry = pml4::PDPe::default();
+            let entry = &mut pdp[j as usize];
             entry.set_present(true);
             entry.set_writable(true);
             entry.set_1gb(paging_level == PagingLevel::Huge);
@@ -418,11 +419,11 @@ fn nk_setup_page_tables(
                 l3_start + (512 * i + j) * PAGE_SIZE
             };
             entry.set_pd_base_addr(addr >> 12);
-
-            let entry_loc = GuestAddress(l2_start + PAGE_SIZE * i + 8 * j);
-            mem.write_obj(entry.0, entry_loc)
-                .map_err(|_| Error::WritePDPTEAddress)?;
         }
+
+        let loc = GuestAddress(l2_start + PAGE_SIZE * i);
+        mem.write_slice(bytemuck::cast_slice(&pdp), loc)
+            .map_err(|_| Error::WritePDPTEAddress)?;
     }
 
     if paging_level == PagingLevel::Huge {
@@ -431,6 +432,8 @@ fn nk_setup_page_tables(
     }
 
     for i in 0..num_l3 {
+        let mut pd = [pml4::PDe(0); 512];
+
         let pd_gpa = min_gpa + i * L2_UNIT;
         let pd_gva = min_gva + i * L2_UNIT;
 
@@ -442,7 +445,7 @@ fn nk_setup_page_tables(
                 break;
             }
 
-            let mut entry = pml4::PDe::default();
+            let entry = &mut pd[j as usize];
             entry.set_present(true);
             entry.set_writable(true);
             entry.set_2mb(paging_level == PagingLevel::Large);
@@ -452,11 +455,11 @@ fn nk_setup_page_tables(
                 l4_start + (512 * i + j) * PAGE_SIZE
             };
             entry.set_pt_base_addr(addr >> 12);
-
-            let entry_loc = GuestAddress(l3_start + PAGE_SIZE * i + 8 * j);
-            mem.write_obj(entry.0, entry_loc)
-                .map_err(|_| Error::WritePDEAddress)?;
         }
+
+        let loc = GuestAddress(l3_start + PAGE_SIZE * i);
+        mem.write_slice(bytemuck::cast_slice(&pd), loc)
+            .map_err(|_| Error::WritePDEAddress)?;
     }
 
     if paging_level == PagingLevel::Large {
@@ -465,6 +468,8 @@ fn nk_setup_page_tables(
     }
 
     for i in 0..num_l4 {
+        let mut pt = [pml4::PTe(0); 512];
+
         let pt_gpa = min_gpa + i * L3_UNIT;
         let pt_gva = min_gva + i * L3_UNIT;
 
@@ -476,15 +481,14 @@ fn nk_setup_page_tables(
                 break;
             }
 
-            let mut entry = pml4::PTe::default();
+            let entry = &mut pt[j as usize];
             entry.set_present(true);
             entry.set_writable(true);
             entry.set_page_base_addr(cur_gpa >> 12);
-
-            let entry_loc = GuestAddress(l4_start + PAGE_SIZE * i + 8 * j);
-            mem.write_obj(entry.0, entry_loc)
-                .map_err(|_| Error::WritePTEAddress)?;
         }
+        let loc = GuestAddress(l4_start + PAGE_SIZE * i);
+        mem.write_slice(bytemuck::cast_slice(&pt), loc)
+            .map_err(|_| Error::WritePTEAddress)?;
     }
 
     sregs.cr3 = l1_start;
