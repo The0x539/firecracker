@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use bitfield::bitfield;
+use vm_memory::ByteValued;
 
 bitfield! {
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -116,6 +117,8 @@ impl IDTe {
         self.set_offset_3((val & 0xFFFF_FFFF_0000_0000) >> 32);
     }
 }
+
+unsafe impl ByteValued for IDTe {}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PagingLevel {
