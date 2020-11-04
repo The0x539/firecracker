@@ -13,6 +13,8 @@ pub mod layout;
 mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
 pub mod msr;
+/// Bitfield structs for constructing x86_64 page tables.
+pub mod pml4;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
 

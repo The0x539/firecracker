@@ -13,6 +13,7 @@ multiboot2-host = { version = "0.2.0", features = ["hvm"] }
 
 arch_gen = { path = "../arch_gen" }
 utils = { path = "../utils" }
+bitfield = "0.13.2"
 
 [dev-dependencies]
 device_tree = ">=1.1.0"
