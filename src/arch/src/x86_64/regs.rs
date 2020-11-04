@@ -313,14 +313,18 @@ fn compute_idmap_pts(mem: &GuestMemoryMmap) -> [u64; 4] {
     ]
 }
 
-fn compute_idmap_base_addr(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
+fn compute_idmap_num_pts(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
     let [l1, l2, l3, l4] = compute_idmap_pts(mem);
-    let num_pt = match level {
+    match level {
         PagingLevel::Colossal => l1,
         PagingLevel::Huge => l1 + l2,
         PagingLevel::Large => l1 + l2 + l3,
         PagingLevel::Normal => l1 + l2 + l3 + l4,
-    };
+    }
+}
+
+fn compute_idmap_base_addr(mem: &GuestMemoryMmap, level: PagingLevel) -> u64 {
+    let num_pt = compute_idmap_num_pts(mem, level);
     let last_addr = mem.last_addr().0;
     let last_page = (last_addr >> 12) << 12;
     last_page - (4 /* gdt/idt/whatever */ + num_pt) * PAGE_SIZE
@@ -350,6 +354,7 @@ fn nk_setup_page_tables(
     };
 
     let [num_l1, num_l2, num_l3, num_l4] = compute_idmap_pts(mem);
+    let num_pts = compute_idmap_num_pts(mem, paging_level);
 
     let l1_start = compute_idmap_base_addr(mem, paging_level);
     let l2_start = l1_start + PAGE_SIZE * num_l1;
@@ -363,8 +368,15 @@ fn nk_setup_page_tables(
         _ => return Err(Error::WritePML4Address),
     };
 
+    let mut buf = vec![[0u64; 512]; num_pts as usize];
+    macro_rules! page {
+        ($type:ty, $i:expr) => {
+            bytemuck::cast_slice_mut::<u64, $type>(&mut buf[($i) as usize])
+        };
+    }
+
     let start = pml4_range.start;
-    let mut pml4 = [pml4::PML4e(0); 512];
+    let pml4 = page!(pml4::PML4e, 0);
 
     for i in pml4_range {
         let j = i - start;
@@ -386,16 +398,16 @@ fn nk_setup_page_tables(
         }
     }
 
-    mem.write_slice(bytemuck::cast_slice(&pml4), GuestAddress(l1_start))
-        .map_err(|_| Error::WritePML4Address)?;
-
     if paging_level == PagingLevel::Colossal {
+        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
+        mem.write_slice(data, GuestAddress(l1_start))
+            .map_err(|_| Error::WritePML4Address)?;
         sregs.cr3 = l1_start;
         return Ok(());
     }
 
     for i in 0..num_l2 {
-        let mut pdp = [pml4::PDPe(0); 512];
+        let pdp = page!(pml4::PDPe, num_l1 + i);
 
         let pdp_gpa = min_gpa + i * L1_UNIT;
         let pdp_gva = min_gva + i * L1_UNIT;
@@ -420,19 +432,18 @@ fn nk_setup_page_tables(
             };
             entry.set_pd_base_addr(addr >> 12);
         }
-
-        let loc = GuestAddress(l2_start + PAGE_SIZE * i);
-        mem.write_slice(bytemuck::cast_slice(&pdp), loc)
-            .map_err(|_| Error::WritePDPTEAddress)?;
     }
 
     if paging_level == PagingLevel::Huge {
+        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
+        mem.write_slice(data, GuestAddress(l1_start))
+            .map_err(|_| Error::WritePML4Address)?;
         sregs.cr3 = l1_start;
         return Ok(());
     }
 
     for i in 0..num_l3 {
-        let mut pd = [pml4::PDe(0); 512];
+        let pd = page!(pml4::PDe, num_l1 + num_l2 + i);
 
         let pd_gpa = min_gpa + i * L2_UNIT;
         let pd_gva = min_gva + i * L2_UNIT;
@@ -456,19 +467,18 @@ fn nk_setup_page_tables(
             };
             entry.set_pt_base_addr(addr >> 12);
         }
-
-        let loc = GuestAddress(l3_start + PAGE_SIZE * i);
-        mem.write_slice(bytemuck::cast_slice(&pd), loc)
-            .map_err(|_| Error::WritePDEAddress)?;
     }
 
     if paging_level == PagingLevel::Large {
+        let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
+        mem.write_slice(data, GuestAddress(l1_start))
+            .map_err(|_| Error::WritePML4Address)?;
         sregs.cr3 = l1_start;
         return Ok(());
     }
 
     for i in 0..num_l4 {
-        let mut pt = [pml4::PTe(0); 512];
+        let pt = page!(pml4::PTe, num_l1 + num_l2 + num_l3 + i);
 
         let pt_gpa = min_gpa + i * L3_UNIT;
         let pt_gva = min_gva + i * L3_UNIT;
@@ -486,11 +496,11 @@ fn nk_setup_page_tables(
             entry.set_writable(true);
             entry.set_page_base_addr(cur_gpa >> 12);
         }
-        let loc = GuestAddress(l4_start + PAGE_SIZE * i);
-        mem.write_slice(bytemuck::cast_slice(&pt), loc)
-            .map_err(|_| Error::WritePTEAddress)?;
     }
 
+    let data = bytemuck::cast_slice::<[u64; 512], u8>(&buf);
+    mem.write_slice(data, GuestAddress(l1_start))
+        .map_err(|_| Error::WritePML4Address)?;
     sregs.cr3 = l1_start;
     Ok(())
 }
