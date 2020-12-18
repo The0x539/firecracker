@@ -149,6 +149,9 @@ pub enum VcpuHcall {
         id: StdioHcallId,
         args: GuestAddress,
     },
+    Gettimeofday {
+        ts: GuestAddress,
+    },
 }
 #[repr(u32)]
 #[derive(TryFromPrimitive)]
@@ -421,6 +424,10 @@ impl KvmVcpu {
                 args: GuestAddress(regs.r8),
             };
             return Ok(Some(hcall));
+        } else if hcall_no == 5 {
+            return Ok(Some(VcpuHcall::Gettimeofday {
+                ts: GuestAddress(regs.r8),
+            }));
         } else if hcall_no == 0 {
             regs.rax = 0;
             self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;

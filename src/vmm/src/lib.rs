@@ -557,6 +557,15 @@ impl Vmm {
                             }
                         }
                     }
+                    VcpuHcall::Gettimeofday { ts } => {
+                        let ts = self
+                            .guest_memory
+                            .get_host_address(ts)
+                            .expect("Invalid guest address for timespec")
+                            .cast::<libc::timeval>();
+
+                        unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 }
+                    }
                 };
 
                 handle.send_hret(VcpuHret(retval));
