@@ -498,11 +498,11 @@ impl Vmm {
     pub fn handle_hcalls(&mut self) {
         for handle in &self.vcpus_handles {
             for hcall in handle.iter_hcalls() {
+                #[repr(C)]
+                struct HcallArgs(usize, usize, usize);
+
                 let retval = match hcall {
                     VcpuHcall::Stdio { id, args } => {
-                        #[repr(C)]
-                        struct HcallArgs(usize, usize, usize);
-
                         let args_ptr = self
                             .guest_memory
                             .get_host_address(args)
@@ -510,11 +510,7 @@ impl Vmm {
                             .cast::<HcallArgs>();
 
                         assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
-                        let args = unsafe {
-                            args_ptr
-                                .as_ref()
-                                .expect("Invalid host address for stdio hcall args")
-                        };
+                        let args = unsafe { &*args_ptr };
 
                         match id {
                             StdioHcallId::Open => {
@@ -557,14 +553,31 @@ impl Vmm {
                             }
                         }
                     }
-                    VcpuHcall::Gettimeofday { ts } => {
+                    VcpuHcall::Gettimeofday { args } => {
+                        let args_ptr = self
+                            .guest_memory
+                            .get_host_address(args)
+                            .expect("Invalid guest address for hcall args")
+                            .cast::<HcallArgs>();
+
+                        assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
+                        let args = unsafe { &*args_ptr };
+
+                        println!("timespec buf GPA: {:016X}", args.0);
+
                         let ts = self
                             .guest_memory
-                            .get_host_address(ts)
-                            .expect("Invalid guest address for timespec")
+                            .get_host_address(GuestAddress(args.0 as u64))
+                            .expect("Invalid guest address for timespec buf")
                             .cast::<libc::timeval>();
 
-                        unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 }
+                        unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
+
+                        let ret = unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 };
+
+                        unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
+
+                        ret
                     }
                 };
 

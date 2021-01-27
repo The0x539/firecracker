@@ -150,7 +150,7 @@ pub enum VcpuHcall {
         args: GuestAddress,
     },
     Gettimeofday {
-        ts: GuestAddress,
+        args: GuestAddress,
     },
 }
 #[repr(u32)]
@@ -426,7 +426,7 @@ impl KvmVcpu {
             return Ok(Some(hcall));
         } else if hcall_no == 5 {
             return Ok(Some(VcpuHcall::Gettimeofday {
-                ts: GuestAddress(regs.r8),
+                args: GuestAddress(regs.r8),
             }));
         } else if hcall_no == 0 {
             regs.rax = 0;
