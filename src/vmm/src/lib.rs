@@ -49,7 +49,7 @@ use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 #[cfg(target_arch = "x86_64")]
 use crate::vstate::vcpu::VcpuState;
 use crate::vstate::{
-    vcpu::{StdioHcallId, Vcpu, VcpuEvent, VcpuHandle, VcpuHcall, VcpuHret, VcpuResponse},
+    vcpu::{Vcpu, VcpuEvent, VcpuHandle, VcpuHcallId, VcpuHret, VcpuResponse},
     vm::Vm,
 };
 use arch::DeviceType;
@@ -501,68 +501,57 @@ impl Vmm {
                 #[repr(C)]
                 struct HcallArgs(usize, usize, usize);
 
-                let retval = match hcall {
-                    VcpuHcall::Stdio { id, args } => {
-                        let args_ptr = self
+                let args_ptr = self
+                    .guest_memory
+                    .get_host_address(hcall.args)
+                    .expect("Invalid guest address for stdio hcall args")
+                    .cast::<HcallArgs>();
+
+                assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
+                // We did fully initialize this thing...right?
+                // Yeah, we zalloc over in the guest, so it's at least zeroed, and that's valid.
+                // I'm sure it'll be fine.
+                let args = unsafe { &*args_ptr };
+
+                let retval = match hcall.id {
+                    VcpuHcallId::Null => 0,
+
+                    VcpuHcallId::Open => {
+                        let pathname = self
                             .guest_memory
-                            .get_host_address(args)
-                            .expect("Invalid guest address for stdio hcall args")
-                            .cast::<HcallArgs>();
+                            .get_host_address(GuestAddress(args.0 as u64))
+                            .expect("Invalid guest address for pathname")
+                            .cast::<i8>();
 
-                        assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
-                        let args = unsafe { &*args_ptr };
+                        let flags = args.1 as i32;
+                        let mode = args.2 as i32;
 
-                        match id {
-                            StdioHcallId::Open => {
-                                let pathname = self
-                                    .guest_memory
-                                    .get_host_address(GuestAddress(args.0 as u64))
-                                    .expect("Invalid guest address for pathname")
-                                    .cast::<i8>();
+                        unsafe { libc::open(pathname, flags, mode) as u64 }
+                    }
 
-                                let flags = args.1 as i32;
-                                let mode = args.2 as i32;
+                    VcpuHcallId::Read | VcpuHcallId::Write => {
+                        let buf = self
+                            .guest_memory
+                            .get_host_address(GuestAddress(args.1 as u64))
+                            .expect("Invalid guest address for buffer")
+                            .cast::<libc::c_void>();
 
-                                unsafe { libc::open(pathname, flags, mode) as u64 }
-                            }
+                        let fd = args.0 as i32;
+                        let count = args.2 as usize;
 
-                            StdioHcallId::Read | StdioHcallId::Write => {
-                                let buf = self
-                                    .guest_memory
-                                    .get_host_address(GuestAddress(args.1 as u64))
-                                    .expect("Invalid guest address for buffer")
-                                    .cast::<libc::c_void>();
-
-                                let fd = args.0 as i32;
-                                let count = args.2 as usize;
-
-                                match id {
-                                    StdioHcallId::Read => unsafe {
-                                        libc::read(fd, buf, count) as u64
-                                    },
-                                    StdioHcallId::Write => unsafe {
-                                        libc::write(fd, buf, count) as u64
-                                    },
-                                    _ => unreachable!(),
-                                }
-                            }
-
-                            StdioHcallId::Close => {
-                                let fd = args.0 as i32;
-                                unsafe { libc::close(fd) as u64 }
-                            }
+                        match hcall.id {
+                            VcpuHcallId::Read => unsafe { libc::read(fd, buf, count) as u64 },
+                            VcpuHcallId::Write => unsafe { libc::write(fd, buf, count) as u64 },
+                            _ => unreachable!(),
                         }
                     }
-                    VcpuHcall::Gettimeofday { args } => {
-                        let args_ptr = self
-                            .guest_memory
-                            .get_host_address(args)
-                            .expect("Invalid guest address for hcall args")
-                            .cast::<HcallArgs>();
 
-                        assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
-                        let args = unsafe { &*args_ptr };
+                    VcpuHcallId::Close => {
+                        let fd = args.0 as i32;
+                        unsafe { libc::close(fd) as u64 }
+                    }
 
+                    VcpuHcallId::GetTimeOfDay => {
                         println!("timespec buf GPA: {:016X}", args.0);
 
                         let ts = self
@@ -571,13 +560,9 @@ impl Vmm {
                             .expect("Invalid guest address for timespec buf")
                             .cast::<libc::timeval>();
 
-                        unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
-
-                        let ret = unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 };
-
-                        unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
-
-                        ret
+                        //unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
+                        unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 }
+                        //unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
                     }
                 };
 

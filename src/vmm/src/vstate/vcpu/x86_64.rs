@@ -141,25 +141,26 @@ impl Display for Error {
 
 type Result<T> = result::Result<T, Error>;
 
-#[derive(PartialEq, Eq)]
-pub struct VcpuHcallId(u32);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct VcpuHret(pub(crate) u64);
-pub enum VcpuHcall {
-    Stdio {
-        id: StdioHcallId,
-        args: GuestAddress,
-    },
-    Gettimeofday {
-        args: GuestAddress,
-    },
-}
+
 #[repr(u32)]
-#[derive(TryFromPrimitive)]
-pub enum StdioHcallId {
+#[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromPrimitive)]
+pub enum VcpuHcallId {
+    Null = 0,
+
     Open = 1,
     Read = 2,
     Write = 3,
     Close = 4,
+
+    GetTimeOfDay = 5,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct VcpuHcall {
+    pub id: VcpuHcallId,
+    pub args: GuestAddress,
 }
 
 /// A wrapper around creating and using a kvm x86_64 vcpu.
@@ -386,7 +387,7 @@ impl KvmVcpu {
                 match addr {
                     0x7C4 => {
                         let hcall_no = NativeEndian::read_u32(data);
-                        return Ok(VcpuEmulation::Hcall(VcpuHcallId(hcall_no)));
+                        return Ok(VcpuEmulation::Hcall(hcall_no));
                     }
                     0xC0C0 => {
                         print!("{}", data[0] as char);
@@ -412,32 +413,22 @@ impl KvmVcpu {
         }
     }
 
-    pub fn build_hcall(&mut self, hcall_no: VcpuHcallId) -> Result<Option<VcpuHcall>> {
-        let hcall_no = hcall_no.0;
-
+    pub fn build_hcall(&mut self, hcall_no: u32) -> Result<Option<VcpuHcall>> {
         println!("output on magic port: {:#08X}", hcall_no);
         let mut regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
 
-        if let Ok(id) = StdioHcallId::try_from(hcall_no) {
-            let hcall = VcpuHcall::Stdio {
+        if let Ok(id) = VcpuHcallId::try_from(hcall_no) {
+            let hcall = VcpuHcall {
                 id,
                 args: GuestAddress(regs.r8),
             };
-            return Ok(Some(hcall));
-        } else if hcall_no == 5 {
-            return Ok(Some(VcpuHcall::Gettimeofday {
-                args: GuestAddress(regs.r8),
-            }));
-        } else if hcall_no == 0 {
-            regs.rax = 0;
-            self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+            Ok(Some(hcall))
         } else {
             println!("Unknown hypercall {:08x}", hcall_no);
             regs.rax = u64::MAX;
             self.fd.set_regs(&regs).map_err(Error::VcpuSetRegs)?;
+            Ok(None)
         }
-
-        Ok(None)
     }
 
     pub fn deliver_hret(&mut self, retval: VcpuHret) -> Result<()> {

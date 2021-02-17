@@ -636,7 +636,7 @@ pub enum VcpuEmulation {
     Handled,
     Interrupted,
     Stopped,
-    Hcall(VcpuHcallId),
+    Hcall(u32),
 }
 
 #[cfg(test)]
