@@ -496,16 +496,18 @@ impl Vmm {
 
     /// Iterates over each core, receiving its pending hcalls and fulfilling them.
     pub fn handle_hcalls(&mut self) {
+        fn guest_deref<T>(mem: &GuestMemoryMmap, addr: u64) -> *mut T {
+            mem.get_host_address(GuestAddress(addr))
+                .unwrap_or_else(|_| panic!("Invalid guest address: {:08X}", addr))
+                as *mut T
+        }
+
         for handle in &self.vcpus_handles {
             for hcall in handle.iter_hcalls() {
                 #[repr(C)]
                 struct HcallArgs(usize, usize, usize);
 
-                let args_ptr = self
-                    .guest_memory
-                    .get_host_address(hcall.args)
-                    .expect("Invalid guest address for stdio hcall args")
-                    .cast::<HcallArgs>();
+                let args_ptr = guest_deref::<HcallArgs>(&self.guest_memory, hcall.args.0);
 
                 assert_eq!(args_ptr.align_offset(std::mem::align_of::<HcallArgs>()), 0);
                 // We did fully initialize this thing...right?
@@ -517,12 +519,7 @@ impl Vmm {
                     VcpuHcallId::Null => 0,
 
                     VcpuHcallId::Open => {
-                        let pathname = self
-                            .guest_memory
-                            .get_host_address(GuestAddress(args.0 as u64))
-                            .expect("Invalid guest address for pathname")
-                            .cast::<i8>();
-
+                        let pathname = guest_deref(&self.guest_memory, args.0 as u64);
                         let flags = args.1 as i32;
                         let mode = args.2 as i32;
 
@@ -530,13 +527,8 @@ impl Vmm {
                     }
 
                     VcpuHcallId::Read | VcpuHcallId::Write => {
-                        let buf = self
-                            .guest_memory
-                            .get_host_address(GuestAddress(args.1 as u64))
-                            .expect("Invalid guest address for buffer")
-                            .cast::<libc::c_void>();
-
                         let fd = args.0 as i32;
+                        let buf = guest_deref(&self.guest_memory, args.1 as u64);
                         let count = args.2 as usize;
 
                         match hcall.id {
@@ -552,17 +544,8 @@ impl Vmm {
                     }
 
                     VcpuHcallId::GetTimeOfDay => {
-                        println!("timespec buf GPA: {:016X}", args.0);
-
-                        let ts = self
-                            .guest_memory
-                            .get_host_address(GuestAddress(args.0 as u64))
-                            .expect("Invalid guest address for timespec buf")
-                            .cast::<libc::timeval>();
-
-                        //unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
+                        let ts = guest_deref(&self.guest_memory, args.0 as u64);
                         unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 }
-                        //unsafe { println!("{} {}", (*ts).tv_sec, (*ts).tv_usec) };
                     }
                 };
 
