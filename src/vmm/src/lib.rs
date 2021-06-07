@@ -547,6 +547,19 @@ impl Vmm {
                         let ts = guest_deref(&self.guest_memory, args.0 as u64);
                         unsafe { libc::gettimeofday(ts, std::ptr::null_mut()) as u64 }
                     }
+
+                    VcpuHcallId::Seek => {
+                        let fildes = args.0 as i32;
+                        let offset = args.1 as i64;
+                        let whence = args.2 as i32;
+
+                        unsafe { libc::lseek(fildes, offset, whence) as u64 }
+                    }
+
+                    VcpuHcallId::Unlink => {
+                        let pathname = guest_deref(&self.guest_memory, args.0 as u64);
+                        unsafe { libc::unlink(pathname) as u64 }
+                    }
                 };
 
                 handle.send_hret(VcpuHret(retval));

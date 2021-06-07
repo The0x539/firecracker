@@ -155,6 +155,9 @@ pub enum VcpuHcallId {
     Close = 4,
 
     GetTimeOfDay = 5,
+
+    Seek = 6,
+    Unlink = 7,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
